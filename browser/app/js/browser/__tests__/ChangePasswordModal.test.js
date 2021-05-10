@@ -1,11 +1,11 @@
 /*
- * MinIO Cloud Storage (C) 2018 MinIO, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,9 +24,6 @@ jest.mock("jwt-decode")
 jwtDecode.mockImplementation(() => ({ sub: "minio" }))
 
 jest.mock("../../web", () => ({
-  GenerateAuth: jest.fn(() => {
-    return Promise.resolve({ accessKey: "gen1", secretKey: "gen2" })
-  }),
   SetAuth: jest.fn(
     ({ currentAccessKey, currentSecretKey, newAccessKey, newSecretKey }) => {
       if (

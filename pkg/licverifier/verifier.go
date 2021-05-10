@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // Package licverifier implements a simple library to verify MinIO Subnet license keys.
 package licverifier
@@ -34,21 +35,21 @@ type LicenseVerifier struct {
 // LicenseInfo holds customer metadata present in the license key.
 type LicenseInfo struct {
 	Email           string    // Email of the license key requestor
-	TeamName        string    // Subnet team name
+	Organization    string    // Subnet organization name
 	AccountID       int64     // Subnet account id
 	StorageCapacity int64     // Storage capacity used in TB
-	ServiceType     string    // Subnet service type
+	Plan            string    // Subnet plan
 	ExpiresAt       time.Time // Time of license expiry
 }
 
 // license key JSON field names
 const (
-	accountID   = "accountId"
-	sub         = "sub"
-	expiresAt   = "exp"
-	teamName    = "teamName"
-	capacity    = "capacity"
-	serviceType = "serviceType"
+	accountID    = "aid"
+	sub          = "sub"
+	expiresAt    = "exp"
+	organization = "org"
+	capacity     = "cap"
+	plan         = "plan"
 )
 
 // NewLicenseVerifier returns an initialized license verifier with the given
@@ -79,24 +80,24 @@ func toLicenseInfo(claims jwt.MapClaims) (LicenseInfo, error) {
 		return LicenseInfo{}, errors.New("Invalid time of expiry in claims")
 	}
 	expiresAt := time.Unix(int64(expiryTS), 0)
-	tName, ok := claims[teamName].(string)
+	orgName, ok := claims[organization].(string)
 	if !ok {
-		return LicenseInfo{}, errors.New("Invalid team name in claims")
+		return LicenseInfo{}, errors.New("Invalid organization in claims")
 	}
 	storageCap, ok := claims[capacity].(float64)
 	if !ok {
 		return LicenseInfo{}, errors.New("Invalid storage capacity in claims")
 	}
-	sType, ok := claims[serviceType].(string)
+	plan, ok := claims[plan].(string)
 	if !ok {
-		return LicenseInfo{}, errors.New("Invalid service type in claims")
+		return LicenseInfo{}, errors.New("Invalid plan in claims")
 	}
 	return LicenseInfo{
 		Email:           email,
-		TeamName:        tName,
+		Organization:    orgName,
 		AccountID:       int64(accID),
 		StorageCapacity: int64(storageCap),
-		ServiceType:     sType,
+		Plan:            plan,
 		ExpiresAt:       expiresAt,
 	}, nil
 

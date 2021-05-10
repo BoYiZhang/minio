@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2019 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -26,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/minio/madmin-go"
 	"github.com/minio/minio/cmd/config"
 	"github.com/minio/minio/cmd/config/cache"
 	"github.com/minio/minio/cmd/config/etcd"
@@ -33,11 +35,9 @@ import (
 	"github.com/minio/minio/cmd/config/identity/openid"
 	"github.com/minio/minio/cmd/config/policy/opa"
 	"github.com/minio/minio/cmd/config/storageclass"
-	"github.com/minio/minio/cmd/crypto"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
 	iampolicy "github.com/minio/minio/pkg/iam/policy"
-	"github.com/minio/minio/pkg/madmin"
 )
 
 func validateAdminReqConfigKV(ctx context.Context, w http.ResponseWriter, r *http.Request) (auth.Credentials, ObjectLayer) {
@@ -49,7 +49,7 @@ func validateAdminReqConfigKV(ctx context.Context, w http.ResponseWriter, r *htt
 	}
 
 	// Validate request signature.
-	cred, adminAPIErr := checkAdminRequestAuthType(ctx, r, iampolicy.ConfigUpdateAdminAction, "")
+	cred, adminAPIErr := checkAdminRequestAuth(ctx, r, iampolicy.ConfigUpdateAdminAction, "")
 	if adminAPIErr != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(adminAPIErr), r.URL)
 		return cred, nil
@@ -62,7 +62,7 @@ func validateAdminReqConfigKV(ctx context.Context, w http.ResponseWriter, r *htt
 func (a adminAPIHandlers) DelConfigKVHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "DeleteConfigKV")
 
-	defer logger.AuditLog(w, r, "DeleteConfigKV", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	cred, objectAPI := validateAdminReqConfigKV(ctx, w, r)
 	if objectAPI == nil {
@@ -104,7 +104,7 @@ func (a adminAPIHandlers) DelConfigKVHandler(w http.ResponseWriter, r *http.Requ
 func (a adminAPIHandlers) SetConfigKVHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "SetConfigKV")
 
-	defer logger.AuditLog(w, r, "SetConfigKV", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	cred, objectAPI := validateAdminReqConfigKV(ctx, w, r)
 	if objectAPI == nil {
@@ -130,13 +130,14 @@ func (a adminAPIHandlers) SetConfigKVHandler(w http.ResponseWriter, r *http.Requ
 		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
 		return
 	}
+
 	dynamic, err := cfg.ReadConfig(bytes.NewReader(kvBytes))
 	if err != nil {
 		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
 		return
 	}
 
-	if err = validateConfig(cfg, objectAPI.SetDriveCount()); err != nil {
+	if err = validateConfig(cfg, objectAPI.SetDriveCounts()); err != nil {
 		writeCustomErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAdminConfigBadJSON), err.Error(), r.URL)
 		return
 	}
@@ -153,20 +154,14 @@ func (a adminAPIHandlers) SetConfigKVHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Make sure to write backend is encrypted
-	if globalConfigEncrypted {
-		saveConfig(GlobalContext, objectAPI, backendEncryptedFile, backendEncryptedMigrationComplete)
-	}
-
-	// Apply dynamic values.
-	if err := applyDynamicConfig(GlobalContext, cfg); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
-	globalNotificationSys.SignalService(serviceReloadDynamic)
-
-	// If all values were dynamic, tell the client.
 	if dynamic {
+		// Apply dynamic values.
+		if err := applyDynamicConfig(GlobalContext, objectAPI, cfg); err != nil {
+			writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
+			return
+		}
+		globalNotificationSys.SignalService(serviceReloadDynamic)
+		// If all values were dynamic, tell the client.
 		w.Header().Set(madmin.ConfigAppliedHeader, madmin.ConfigAppliedTrue)
 	}
 	writeSuccessResponseHeadersOnly(w)
@@ -176,7 +171,7 @@ func (a adminAPIHandlers) SetConfigKVHandler(w http.ResponseWriter, r *http.Requ
 func (a adminAPIHandlers) GetConfigKVHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "GetConfigKV")
 
-	defer logger.AuditLog(w, r, "GetConfigKV", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	cred, objectAPI := validateAdminReqConfigKV(ctx, w, r)
 	if objectAPI == nil {
@@ -214,7 +209,7 @@ func (a adminAPIHandlers) GetConfigKVHandler(w http.ResponseWriter, r *http.Requ
 func (a adminAPIHandlers) ClearConfigHistoryKVHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "ClearConfigHistoryKV")
 
-	defer logger.AuditLog(w, r, "ClearConfigHistoryKV", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	_, objectAPI := validateAdminReqConfigKV(ctx, w, r)
 	if objectAPI == nil {
@@ -251,7 +246,7 @@ func (a adminAPIHandlers) ClearConfigHistoryKVHandler(w http.ResponseWriter, r *
 func (a adminAPIHandlers) RestoreConfigHistoryKVHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "RestoreConfigHistoryKV")
 
-	defer logger.AuditLog(w, r, "RestoreConfigHistoryKV", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	_, objectAPI := validateAdminReqConfigKV(ctx, w, r)
 	if objectAPI == nil {
@@ -282,7 +277,7 @@ func (a adminAPIHandlers) RestoreConfigHistoryKVHandler(w http.ResponseWriter, r
 		return
 	}
 
-	if err = validateConfig(cfg, objectAPI.SetDriveCount()); err != nil {
+	if err = validateConfig(cfg, objectAPI.SetDriveCounts()); err != nil {
 		writeCustomErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAdminConfigBadJSON), err.Error(), r.URL)
 		return
 	}
@@ -299,7 +294,7 @@ func (a adminAPIHandlers) RestoreConfigHistoryKVHandler(w http.ResponseWriter, r
 func (a adminAPIHandlers) ListConfigHistoryKVHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "ListConfigHistoryKV")
 
-	defer logger.AuditLog(w, r, "ListConfigHistoryKV", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	cred, objectAPI := validateAdminReqConfigKV(ctx, w, r)
 	if objectAPI == nil {
@@ -339,7 +334,7 @@ func (a adminAPIHandlers) ListConfigHistoryKVHandler(w http.ResponseWriter, r *h
 func (a adminAPIHandlers) HelpConfigKVHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "HelpConfigKV")
 
-	defer logger.AuditLog(w, r, "HelpHistoryKV", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	_, objectAPI := validateAdminReqConfigKV(ctx, w, r)
 	if objectAPI == nil {
@@ -367,7 +362,7 @@ func (a adminAPIHandlers) HelpConfigKVHandler(w http.ResponseWriter, r *http.Req
 func (a adminAPIHandlers) SetConfigHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "SetConfig")
 
-	defer logger.AuditLog(w, r, "SetConfig", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	cred, objectAPI := validateAdminReqConfigKV(ctx, w, r)
 	if objectAPI == nil {
@@ -394,7 +389,7 @@ func (a adminAPIHandlers) SetConfigHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err = validateConfig(cfg, objectAPI.SetDriveCount()); err != nil {
+	if err = validateConfig(cfg, objectAPI.SetDriveCounts()); err != nil {
 		writeCustomErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAdminConfigBadJSON), err.Error(), r.URL)
 		return
 	}
@@ -411,11 +406,6 @@ func (a adminAPIHandlers) SetConfigHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Make sure to write backend is encrypted
-	if globalConfigEncrypted {
-		saveConfig(GlobalContext, objectAPI, backendEncryptedFile, backendEncryptedMigrationComplete)
-	}
-
 	writeSuccessResponseHeadersOnly(w)
 }
 
@@ -424,7 +414,7 @@ func (a adminAPIHandlers) SetConfigHandler(w http.ResponseWriter, r *http.Reques
 func (a adminAPIHandlers) GetConfigHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "GetConfig")
 
-	defer logger.AuditLog(w, r, "GetConfig", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	cred, objectAPI := validateAdminReqConfigKV(ctx, w, r)
 	if objectAPI == nil {
@@ -454,10 +444,6 @@ func (a adminAPIHandlers) GetConfigHandler(w http.ResponseWriter, r *http.Reques
 				off = !cache.Enabled(kv)
 			case config.StorageClassSubSys:
 				off = !storageclass.Enabled(kv)
-			case config.KmsVaultSubSys:
-				off = !crypto.EnabledVault(kv)
-			case config.KmsKesSubSys:
-				off = !crypto.EnabledKes(kv)
 			case config.PolicyOPASubSys:
 				off = !opa.Enabled(kv)
 			case config.IdentityOpenIDSubSys:

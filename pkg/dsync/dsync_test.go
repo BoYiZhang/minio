@@ -1,24 +1,24 @@
-/*
- * Minio Cloud Storage, (C) 2016 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-// GOMAXPROCS=10 go test
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package dsync_test
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
@@ -32,19 +32,26 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/minio/minio/pkg/dsync"
 	. "github.com/minio/minio/pkg/dsync"
 )
+
+const numberOfNodes = 5
 
 var ds *Dsync
 var rpcPaths []string // list of rpc paths where lock server is serving.
 
-func startRPCServers(nodes []string) {
+var nodes = make([]string, numberOfNodes) // list of node IP addrs or hostname with ports.
+var lockServers []*lockServer
+
+func startRPCServers() {
 	for i := range nodes {
 		server := rpc.NewServer()
-		server.RegisterName("Dsync", &lockServer{
+		ls := &lockServer{
 			mutex:   sync.Mutex{},
 			lockMap: make(map[string]int64),
-		})
+		}
+		server.RegisterName("Dsync", ls)
 		// For some reason the registration paths need to be different (even for different server objs)
 		server.HandleHTTP(rpcPaths[i], fmt.Sprintf("%s-debug", rpcPaths[i]))
 		l, e := net.Listen("tcp", ":"+strconv.Itoa(i+12345))
@@ -52,6 +59,8 @@ func startRPCServers(nodes []string) {
 			log.Fatal("listen error:", e)
 		}
 		go http.Serve(l, nil)
+
+		lockServers = append(lockServers, ls)
 	}
 
 	// Let servers start
@@ -64,7 +73,6 @@ func TestMain(m *testing.M) {
 
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	nodes := make([]string, 5) // list of node IP addrs or hostname with ports.
 	for i := range nodes {
 		nodes[i] = fmt.Sprintf("127.0.0.1:%d", i+12345)
 	}
@@ -82,7 +90,7 @@ func TestMain(m *testing.M) {
 		GetLockers: func() ([]NetLocker, string) { return clnts, uuid.New().String() },
 	}
 
-	startRPCServers(nodes)
+	startRPCServers()
 
 	os.Exit(m.Run())
 }
@@ -229,6 +237,42 @@ func TestTwoSimultaneousLocksForDifferentResources(t *testing.T) {
 	dm2.Unlock()
 
 	time.Sleep(10 * time.Millisecond)
+}
+
+// Test refreshing lock
+func TestFailedRefreshLock(t *testing.T) {
+	// Simulate Refresh RPC response to return no locking found
+	for i := range lockServers {
+		lockServers[i].setRefreshReply(false)
+	}
+
+	dm := NewDRWMutex(ds, "aap")
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+
+	ctx, cl := context.WithCancel(context.Background())
+	cancel := func() {
+		cl()
+		wg.Done()
+	}
+
+	if !dm.GetLock(ctx, cancel, id, source, dsync.Options{Timeout: 5 * time.Minute}) {
+		t.Fatal("GetLock() should be successful")
+	}
+
+	// Wait until context is canceled
+	wg.Wait()
+	if ctx.Err() == nil {
+		t.Fatal("Unexpected error", ctx.Err())
+	}
+
+	// Should be safe operation in all cases
+	dm.Unlock()
+
+	// Revert Refresh RPC response to locking found
+	for i := range lockServers {
+		lockServers[i].setRefreshReply(false)
+	}
 }
 
 // Borrowed from mutex_test.go

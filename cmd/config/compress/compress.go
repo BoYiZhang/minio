@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2019 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package compress
 
@@ -26,23 +27,26 @@ import (
 
 // Config represents the compression settings.
 type Config struct {
-	Enabled    bool     `json:"enabled"`
-	Extensions []string `json:"extensions"`
-	MimeTypes  []string `json:"mime-types"`
+	Enabled        bool     `json:"enabled"`
+	AllowEncrypted bool     `json:"allow_encryption"`
+	Extensions     []string `json:"extensions"`
+	MimeTypes      []string `json:"mime-types"`
 }
 
 // Compression environment variables
 const (
-	Extensions = "extensions"
-	MimeTypes  = "mime_types"
+	Extensions     = "extensions"
+	AllowEncrypted = "allow_encryption"
+	MimeTypes      = "mime_types"
 
-	EnvCompressState      = "MINIO_COMPRESS_ENABLE"
-	EnvCompressExtensions = "MINIO_COMPRESS_EXTENSIONS"
-	EnvCompressMimeTypes  = "MINIO_COMPRESS_MIME_TYPES"
+	EnvCompressState           = "MINIO_COMPRESS_ENABLE"
+	EnvCompressAllowEncryption = "MINIO_COMPRESS_ALLOW_ENCRYPTION"
+	EnvCompressExtensions      = "MINIO_COMPRESS_EXTENSIONS"
+	EnvCompressMimeTypes       = "MINIO_COMPRESS_MIME_TYPES"
 
 	// Include-list for compression.
 	DefaultExtensions = ".txt,.log,.csv,.json,.tar,.xml,.bin"
-	DefaultMimeTypes  = "text/*,application/json,application/xml"
+	DefaultMimeTypes  = "text/*,application/json,application/xml,binary/octet-stream"
 )
 
 // DefaultKVS - default KV config for compression settings
@@ -50,6 +54,10 @@ var (
 	DefaultKVS = config.KVS{
 		config.KV{
 			Key:   config.Enable,
+			Value: config.EnableOff,
+		},
+		config.KV{
+			Key:   AllowEncrypted,
 			Value: config.EnableOff,
 		},
 		config.KV{
@@ -99,6 +107,12 @@ func LookupConfig(kvs config.KVS) (Config, error) {
 	}
 	if !cfg.Enabled {
 		return cfg, nil
+	}
+
+	allowEnc := env.Get(EnvCompressAllowEncryption, kvs.Get(AllowEncrypted))
+	cfg.AllowEncrypted, err = config.ParseBool(allowEnc)
+	if err != nil {
+		return cfg, err
 	}
 
 	compressExtensions := env.Get(EnvCompressExtensions, kvs.Get(Extensions))

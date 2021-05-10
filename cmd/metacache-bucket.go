@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -21,9 +22,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"net/http"
 	"path"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -63,7 +65,7 @@ func newBucketMetacache(bucket string, cleanup bool) *bucketMetacache {
 		ez, ok := objAPI.(*erasureServerPools)
 		if ok {
 			ctx := context.Background()
-			ez.deleteAll(ctx, minioMetaBucket, metacachePrefixForID(bucket, slashSeparator))
+			ez.renameAll(ctx, minioMetaBucket, metacachePrefixForID(bucket, slashSeparator))
 		}
 	}
 	return &bucketMetacache{
@@ -74,8 +76,8 @@ func newBucketMetacache(bucket string, cleanup bool) *bucketMetacache {
 }
 
 func (b *bucketMetacache) debugf(format string, data ...interface{}) {
-	if metacacheDebug {
-		console.Debugf(format, data...)
+	if serverDebugLog {
+		console.Debugf(format+"\n", data...)
 	}
 }
 
@@ -95,24 +97,19 @@ func loadBucketMetaCache(ctx context.Context, bucket string) (*bucketMetacache, 
 			logger.LogIf(ctx, fmt.Errorf("loadBucketMetaCache: object layer not ready. bucket: %q", bucket))
 		}
 	}
+
 	var meta bucketMetacache
 	var decErr error
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	r, w := io.Pipe()
-	go func() {
-		defer wg.Done()
+	// Use global context for this.
+	r, err := objAPI.GetObjectNInfo(GlobalContext, minioMetaBucket, pathJoin("buckets", bucket, ".metacache", "index.s2"), nil, http.Header{}, readLock, ObjectOptions{})
+	if err == nil {
 		dec := s2DecPool.Get().(*s2.Reader)
 		dec.Reset(r)
 		decErr = meta.DecodeMsg(msgp.NewReader(dec))
 		dec.Reset(nil)
+		r.Close()
 		s2DecPool.Put(dec)
-		r.CloseWithError(decErr)
-	}()
-	// Use global context for this.
-	err := objAPI.GetObject(GlobalContext, minioMetaBucket, pathJoin("buckets", bucket, ".metacache", "index.s2"), 0, -1, w, "", ObjectOptions{})
-	logger.LogIf(ctx, w.CloseWithError(err))
+	}
 	if err != nil {
 		switch err.(type) {
 		case ObjectNotFound:
@@ -125,7 +122,6 @@ func loadBucketMetaCache(ctx context.Context, bucket string) (*bucketMetacache, 
 		}
 		return newBucketMetacache(bucket, false), err
 	}
-	wg.Wait()
 	if decErr != nil {
 		if errors.Is(err, context.Canceled) {
 			return newBucketMetacache(bucket, false), err
@@ -181,11 +177,11 @@ func (b *bucketMetacache) save(ctx context.Context) error {
 	b.updated = false
 	b.mu.Unlock()
 
-	hr, err := hash.NewReader(tmp, int64(tmp.Len()), "", "", int64(tmp.Len()), false)
+	hr, err := hash.NewReader(tmp, int64(tmp.Len()), "", "", int64(tmp.Len()))
 	if err != nil {
 		return err
 	}
-	_, err = objAPI.PutObject(ctx, minioMetaBucket, pathJoin("buckets", b.bucket, ".metacache", "index.s2"), NewPutObjReader(hr, nil, nil), ObjectOptions{})
+	_, err = objAPI.PutObject(ctx, minioMetaBucket, pathJoin("buckets", b.bucket, ".metacache", "index.s2"), NewPutObjReader(hr), ObjectOptions{})
 	logger.LogIf(ctx, err)
 	return err
 }
@@ -297,7 +293,7 @@ func (b *bucketMetacache) cleanup() {
 	caches, rootIdx := b.cloneCaches()
 
 	for id, cache := range caches {
-		if b.transient && time.Since(cache.lastUpdate) > 15*time.Minute && time.Since(cache.lastHandout) > 15*time.Minute {
+		if b.transient && time.Since(cache.lastUpdate) > 10*time.Minute && time.Since(cache.lastHandout) > 10*time.Minute {
 			// Keep transient caches only for 15 minutes.
 			remove[id] = struct{}{}
 			continue
@@ -350,6 +346,29 @@ func (b *bucketMetacache) cleanup() {
 		}
 	}
 
+	// If above limit, remove the caches with the oldest handout time.
+	if len(caches)-len(remove) > metacacheMaxEntries {
+		remainCaches := make([]metacache, 0, len(caches)-len(remove))
+		for id, cache := range caches {
+			if _, ok := remove[id]; ok {
+				continue
+			}
+			remainCaches = append(remainCaches, cache)
+		}
+		if len(remainCaches) > metacacheMaxEntries {
+			// Sort oldest last...
+			sort.Slice(remainCaches, func(i, j int) bool {
+				return remainCaches[i].lastHandout.Before(remainCaches[j].lastHandout)
+			})
+			// Keep first metacacheMaxEntries...
+			for _, cache := range remainCaches[metacacheMaxEntries:] {
+				if time.Since(cache.lastHandout) > 30*time.Minute {
+					remove[cache.id] = struct{}{}
+				}
+			}
+		}
+	}
+
 	for id := range remove {
 		b.deleteCache(id)
 	}
@@ -391,7 +410,6 @@ func (b *bucketMetacache) updateCacheEntry(update metacache) (metacache, error) 
 	defer b.mu.Unlock()
 	existing, ok := b.caches[update.id]
 	if !ok {
-		logger.Info("updateCacheEntry: bucket %s list id %v not found", b.bucket, update.id)
 		return update, errFileNotFound
 	}
 	existing.update(update)
@@ -437,7 +455,7 @@ func (b *bucketMetacache) deleteAll() {
 	ctx := context.Background()
 	ez, ok := newObjectLayerFn().(*erasureServerPools)
 	if !ok {
-		logger.LogIf(ctx, errors.New("bucketMetacache: expected objAPI to be *erasureZones"))
+		logger.LogIf(ctx, errors.New("bucketMetacache: expected objAPI to be *erasurePools"))
 		return
 	}
 
@@ -447,7 +465,7 @@ func (b *bucketMetacache) deleteAll() {
 	b.updated = true
 	if !b.transient {
 		// Delete all.
-		ez.deleteAll(ctx, minioMetaBucket, metacachePrefixForID(b.bucket, slashSeparator))
+		ez.renameAll(ctx, minioMetaBucket, metacachePrefixForID(b.bucket, slashSeparator))
 		b.caches = make(map[string]metacache, 10)
 		b.cachesRoot = make(map[string][]string, 10)
 		return
@@ -459,7 +477,7 @@ func (b *bucketMetacache) deleteAll() {
 		wg.Add(1)
 		go func(cache metacache) {
 			defer wg.Done()
-			ez.deleteAll(ctx, minioMetaBucket, metacachePrefixForID(cache.bucket, cache.id))
+			ez.renameAll(ctx, minioMetaBucket, metacachePrefixForID(cache.bucket, cache.id))
 		}(b.caches[id])
 	}
 	wg.Wait()

@@ -1,19 +1,5 @@
 #!/bin/bash
 #
-# MinIO Cloud Storage, (C) 2017, 2018 MinIO, Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
 
 set -e
 set -E
@@ -33,6 +19,7 @@ export ACCESS_KEY="minio"
 export SECRET_KEY="minio123"
 export ENABLE_HTTPS=0
 export GO111MODULE=on
+export GOGC=25
 
 MINIO_CONFIG_DIR="$WORK_DIR/.minio"
 MINIO=( "$PWD/minio" --config-dir "$MINIO_CONFIG_DIR" )
@@ -63,8 +50,8 @@ function start_minio_erasure_sets()
 
 function start_minio_pool_erasure_sets()
 {
-    export MINIO_ACCESS_KEY=$ACCESS_KEY
-    export MINIO_SECRET_KEY=$SECRET_KEY
+    export MINIO_ROOT_USER=$ACCESS_KEY
+    export MINIO_ROOT_PASSWORD=$SECRET_KEY
     export MINIO_ENDPOINTS="http://127.0.0.1:9000${WORK_DIR}/pool-disk-sets{1...4} http://127.0.0.1:9001${WORK_DIR}/pool-disk-sets{5...8}"
     "${MINIO[@]}" server --address ":9000" > "$WORK_DIR/pool-minio-9000.log" 2>&1 &
     "${MINIO[@]}" server --address ":9001" > "$WORK_DIR/pool-minio-9001.log" 2>&1 &
@@ -74,8 +61,8 @@ function start_minio_pool_erasure_sets()
 
 function start_minio_pool_erasure_sets_ipv6()
 {
-    export MINIO_ACCESS_KEY=$ACCESS_KEY
-    export MINIO_SECRET_KEY=$SECRET_KEY
+    export MINIO_ROOT_USER=$ACCESS_KEY
+    export MINIO_ROOT_PASSWORD=$SECRET_KEY
     export MINIO_ENDPOINTS="http://[::1]:9000${WORK_DIR}/pool-disk-sets{1...4} http://[::1]:9001${WORK_DIR}/pool-disk-sets{5...8}"
     "${MINIO[@]}" server --address="[::1]:9000" > "$WORK_DIR/pool-minio-ipv6-9000.log" 2>&1 &
     "${MINIO[@]}" server --address="[::1]:9001" > "$WORK_DIR/pool-minio-ipv6-9001.log" 2>&1 &
@@ -85,8 +72,8 @@ function start_minio_pool_erasure_sets_ipv6()
 
 function start_minio_dist_erasure()
 {
-    export MINIO_ACCESS_KEY=$ACCESS_KEY
-    export MINIO_SECRET_KEY=$SECRET_KEY
+    export MINIO_ROOT_USER=$ACCESS_KEY
+    export MINIO_ROOT_PASSWORD=$SECRET_KEY
     export MINIO_ENDPOINTS="http://127.0.0.1:9000${WORK_DIR}/dist-disk1 http://127.0.0.1:9001${WORK_DIR}/dist-disk2 http://127.0.0.1:9002${WORK_DIR}/dist-disk3 http://127.0.0.1:9003${WORK_DIR}/dist-disk4"
     for i in $(seq 0 3); do
         "${MINIO[@]}" server --address ":900${i}" > "$WORK_DIR/dist-minio-900${i}.log" 2>&1 &

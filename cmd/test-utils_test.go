@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2015, 2016, 2017, 2018 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -54,6 +55,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+
 	"github.com/gorilla/mux"
 	"github.com/minio/minio-go/v7/pkg/s3utils"
 	"github.com/minio/minio-go/v7/pkg/signer"
@@ -80,12 +82,11 @@ func TestMain(m *testing.M) {
 
 	// disable ENVs which interfere with tests.
 	for _, env := range []string{
-		crypto.EnvAutoEncryptionLegacy,
 		crypto.EnvKMSAutoEncryption,
 		config.EnvAccessKey,
-		config.EnvAccessKeyOld,
 		config.EnvSecretKey,
-		config.EnvSecretKeyOld,
+		config.EnvRootUser,
+		config.EnvRootPassword,
 	} {
 		os.Unsetenv(env)
 	}
@@ -107,7 +108,7 @@ func TestMain(m *testing.M) {
 	// Initialize globalConsoleSys system
 	globalConsoleSys = NewConsoleLogger(context.Background())
 
-	globalDNSCache = xhttp.NewDNSCache(3*time.Second, 10*time.Second)
+	globalDNSCache = xhttp.NewDNSCache(3*time.Second, 10*time.Second, logger.LogOnceIf)
 
 	globalInternodeTransport = newInternodeHTTPTransport(nil, rest.DefaultTimeout)()
 
@@ -160,11 +161,11 @@ func calculateSignedChunkLength(chunkDataSize int64) int64 {
 }
 
 func mustGetPutObjReader(t TestErrHandler, data io.Reader, size int64, md5hex, sha256hex string) *PutObjReader {
-	hr, err := hash.NewReader(data, size, md5hex, sha256hex, size, globalCLIContext.StrictS3Compat)
+	hr, err := hash.NewReader(data, size, md5hex, sha256hex, size)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewPutObjReader(hr, nil, nil)
+	return NewPutObjReader(hr)
 }
 
 // calculateSignedChunkLength - calculates the length of the overall stream (data + metadata)
@@ -205,7 +206,7 @@ func prepareErasure(ctx context.Context, nDisks int) (ObjectLayer, []string, err
 	if err != nil {
 		return nil, nil, err
 	}
-	obj, _, err := initObjectLayer(ctx, mustGetZoneEndpoints(fsDirs...))
+	obj, _, err := initObjectLayer(ctx, mustGetPoolEndpoints(fsDirs...))
 	if err != nil {
 		removeRoots(fsDirs)
 		return nil, nil, err
@@ -233,13 +234,7 @@ func initFSObjects(disk string, t *testing.T) (obj ObjectLayer) {
 // Using this interface, functionalities to be used in tests can be
 // made generalized, and can be integrated in benchmarks/unit tests/go check suite tests.
 type TestErrHandler interface {
-	Log(args ...interface{})
-	Logf(format string, args ...interface{})
-	Error(args ...interface{})
-	Errorf(format string, args ...interface{})
-	Failed() bool
-	Fatal(args ...interface{})
-	Fatalf(format string, args ...interface{})
+	testing.TB
 }
 
 const (
@@ -331,7 +326,7 @@ func UnstartedTestServer(t TestErrHandler, instanceType string) TestServer {
 	credentials := globalActiveCred
 
 	testServer.Obj = objLayer
-	testServer.Disks = mustGetZoneEndpoints(disks...)
+	testServer.Disks = mustGetPoolEndpoints(disks...)
 	testServer.AccessKey = credentials.AccessKey
 	testServer.SecretKey = credentials.SecretKey
 
@@ -356,6 +351,8 @@ func UnstartedTestServer(t TestErrHandler, instanceType string) TestServer {
 	newAllSubsystems()
 
 	initAllSubsystems(ctx, objLayer)
+
+	globalIAMSys.InitStore(objLayer)
 
 	return testServer
 }
@@ -1576,6 +1573,8 @@ func newTestObjectLayer(ctx context.Context, endpointServerPools EndpointServerP
 
 	initAllSubsystems(ctx, z)
 
+	globalIAMSys.InitStore(z)
+
 	return z, nil
 }
 
@@ -1621,6 +1620,8 @@ func initAPIHandlerTest(obj ObjectLayer, endpoints []string) (string, http.Handl
 	newAllSubsystems()
 
 	initAllSubsystems(context.Background(), obj)
+
+	globalIAMSys.InitStore(obj)
 
 	// get random bucket name.
 	bucketName := getRandomBucketName()
@@ -1866,6 +1867,14 @@ func ExecObjectLayerAPITest(t *testing.T, objAPITest objAPITestType, endpoints [
 	removeRoots(append(erasureDisks, fsDir))
 }
 
+// ExecExtendedObjectLayerTest will execute the tests with combinations of encrypted & compressed.
+// This can be used to test functionality when reading and writing data.
+func ExecExtendedObjectLayerAPITest(t *testing.T, objAPITest objAPITestType, endpoints []string) {
+	execExtended(t, func(t *testing.T) {
+		ExecObjectLayerAPITest(t, objAPITest, endpoints)
+	})
+}
+
 // function to be passed to ExecObjectLayerAPITest, for executing object layr API handler tests.
 type objAPITestType func(obj ObjectLayer, instanceType string, bucketName string,
 	apiRouter http.Handler, credentials auth.Credentials, t *testing.T)
@@ -1906,6 +1915,8 @@ func ExecObjectLayerTest(t TestErrHandler, objTest objTestType) {
 
 	initAllSubsystems(ctx, objLayer)
 
+	globalIAMSys.InitStore(objLayer)
+
 	// Executing the object layer tests for single node setup.
 	objTest(objLayer, FSTestStr, t)
 
@@ -1924,6 +1935,8 @@ func ExecObjectLayerTest(t TestErrHandler, objTest objTestType) {
 	defer objLayer.Shutdown(context.Background())
 
 	initAllSubsystems(ctx, objLayer)
+
+	globalIAMSys.InitStore(objLayer)
 
 	defer removeRoots(append(fsDirs, fsDir))
 	// Executing the object layer tests for Erasure.
@@ -1992,7 +2005,7 @@ func ExecObjectLayerStaleFilesTest(t *testing.T, objTest objTestStaleFilesType) 
 	if err != nil {
 		t.Fatalf("Initialization of disks for Erasure setup: %s", err)
 	}
-	objLayer, _, err := initObjectLayer(ctx, mustGetZoneEndpoints(erasureDisks...))
+	objLayer, _, err := initObjectLayer(ctx, mustGetPoolEndpoints(erasureDisks...))
 	if err != nil {
 		t.Fatalf("Initialization of object layer failed for Erasure setup: %s", err)
 	}
@@ -2242,7 +2255,7 @@ func generateTLSCertKey(host string) ([]byte, []byte, error) {
 	return certOut.Bytes(), keyOut.Bytes(), nil
 }
 
-func mustGetZoneEndpoints(args ...string) EndpointServerPools {
+func mustGetPoolEndpoints(args ...string) EndpointServerPools {
 	endpoints := mustGetNewEndpoints(args...)
 	drivesPerSet := len(args)
 	setCount := 1
@@ -2250,7 +2263,7 @@ func mustGetZoneEndpoints(args ...string) EndpointServerPools {
 		drivesPerSet = 16
 		setCount = len(args) / 16
 	}
-	return []ZoneEndpoints{{
+	return []PoolEndpoints{{
 		SetCount:     setCount,
 		DrivesPerSet: drivesPerSet,
 		Endpoints:    endpoints,

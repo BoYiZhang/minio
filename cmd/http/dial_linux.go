@@ -1,20 +1,21 @@
 // +build linux
 
-/*
- * MinIO Cloud Storage, (C) 2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package http
 
@@ -38,6 +39,10 @@ func setInternalTCPParameters(c syscall.RawConn) error {
 		// since Linux 4.11.
 		_ = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, unix.TCP_FASTOPEN_CONNECT, 1)
 
+		// Enable TCP quick ACK, John Nagle says
+		// "Set TCP_QUICKACK. If you find a case where that makes things worse, let me know."
+		_ = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, unix.TCP_QUICKACK, 1)
+
 		// The time (in seconds) the connection needs to remain idle before
 		// TCP starts sending keepalive probes, set this to 5 secs
 		// system defaults to 7200 secs!!!
@@ -52,6 +57,7 @@ func setInternalTCPParameters(c syscall.RawConn) error {
 		// ~ cat /proc/sys/net/ipv4/tcp_keepalive_intvl (defaults to 75 secs, we reduce it to 3 secs)
 		// 75
 		_ = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_KEEPINTVL, 3)
+
 	})
 }
 
@@ -86,6 +92,10 @@ func NewCustomDialContext(dialTimeout time.Duration) DialContext {
 					// the TCP fast open connect. This feature is supported
 					// since Linux 4.11.
 					_ = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, unix.TCP_FASTOPEN_CONNECT, 1)
+
+					// Enable TCP quick ACK, John Nagle says
+					// "Set TCP_QUICKACK. If you find a case where that makes things worse, let me know."
+					_ = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, unix.TCP_QUICKACK, 1)
 				})
 			},
 		}

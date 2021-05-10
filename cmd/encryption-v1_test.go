@@ -1,34 +1,32 @@
-/*
- * MinIO Cloud Storage, (C) 2017, 2018 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
-	"fmt"
 	"net/http"
-	"os"
 	"testing"
 
 	humanize "github.com/dustin/go-humanize"
-	"github.com/klauspost/compress/zstd"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
 	"github.com/minio/minio/cmd/crypto"
+	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/sio"
 )
 
@@ -38,27 +36,27 @@ var encryptRequestTests = []struct {
 }{
 	{
 		header: map[string]string{
-			crypto.SSECAlgorithm: "AES256",
-			crypto.SSECKey:       "XAm0dRrJsEsyPb1UuFNezv1bl9hxuYsgUVC/MUctE2k=",
-			crypto.SSECKeyMD5:    "bY4wkxQejw9mUJfo72k53A==",
+			xhttp.AmzServerSideEncryptionCustomerAlgorithm: "AES256",
+			xhttp.AmzServerSideEncryptionCustomerKey:       "XAm0dRrJsEsyPb1UuFNezv1bl9hxuYsgUVC/MUctE2k=",
+			xhttp.AmzServerSideEncryptionCustomerKeyMD5:    "bY4wkxQejw9mUJfo72k53A==",
 		},
 		metadata: map[string]string{},
 	},
 	{
 		header: map[string]string{
-			crypto.SSECAlgorithm: "AES256",
-			crypto.SSECKey:       "XAm0dRrJsEsyPb1UuFNezv1bl9hxuYsgUVC/MUctE2k=",
-			crypto.SSECKeyMD5:    "bY4wkxQejw9mUJfo72k53A==",
+			xhttp.AmzServerSideEncryptionCustomerAlgorithm: "AES256",
+			xhttp.AmzServerSideEncryptionCustomerKey:       "XAm0dRrJsEsyPb1UuFNezv1bl9hxuYsgUVC/MUctE2k=",
+			xhttp.AmzServerSideEncryptionCustomerKeyMD5:    "bY4wkxQejw9mUJfo72k53A==",
 		},
 		metadata: map[string]string{
-			crypto.SSECKey: "XAm0dRrJsEsyPb1UuFNezv1bl9hxuYsgUVC/MUctE2k=",
+			xhttp.AmzServerSideEncryptionCustomerKey: "XAm0dRrJsEsyPb1UuFNezv1bl9hxuYsgUVC/MUctE2k=",
 		},
 	},
 }
 
 func TestEncryptRequest(t *testing.T) {
-	defer func(flag bool) { globalIsSSL = flag }(globalIsSSL)
-	globalIsSSL = true
+	defer func(flag bool) { globalIsTLS = flag }(globalIsTLS)
+	globalIsTLS = true
 	for i, test := range encryptRequestTests {
 		content := bytes.NewReader(make([]byte, 64))
 		req := &http.Request{Header: http.Header{}}
@@ -70,13 +68,13 @@ func TestEncryptRequest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Test %d: Failed to encrypt request: %v", i, err)
 		}
-		if kdf, ok := test.metadata[crypto.SSESealAlgorithm]; !ok {
+		if kdf, ok := test.metadata[crypto.MetaAlgorithm]; !ok {
 			t.Errorf("Test %d: ServerSideEncryptionKDF must be part of metadata: %v", i, kdf)
 		}
-		if iv, ok := test.metadata[crypto.SSEIV]; !ok {
+		if iv, ok := test.metadata[crypto.MetaIV]; !ok {
 			t.Errorf("Test %d: crypto.SSEIV must be part of metadata: %v", i, iv)
 		}
-		if mac, ok := test.metadata[crypto.SSECSealedKey]; !ok {
+		if mac, ok := test.metadata[crypto.MetaSealedKeySSEC]; !ok {
 			t.Errorf("Test %d: ServerSideEncryptionKeyMAC must be part of metadata: %v", i, mac)
 		}
 	}
@@ -93,33 +91,33 @@ var decryptObjectInfoTests = []struct {
 		expErr:  nil,
 	},
 	{
-		info:    ObjectInfo{Size: 100, UserDefined: map[string]string{crypto.SSESealAlgorithm: crypto.InsecureSealAlgorithm}},
-		request: &http.Request{Header: http.Header{crypto.SSECAlgorithm: []string{crypto.SSEAlgorithmAES256}}},
+		info:    ObjectInfo{Size: 100, UserDefined: map[string]string{crypto.MetaAlgorithm: crypto.InsecureSealAlgorithm}},
+		request: &http.Request{Header: http.Header{xhttp.AmzServerSideEncryption: []string{xhttp.AmzEncryptionAES}}},
 		expErr:  nil,
 	},
 	{
-		info:    ObjectInfo{Size: 0, UserDefined: map[string]string{crypto.SSESealAlgorithm: crypto.InsecureSealAlgorithm}},
-		request: &http.Request{Header: http.Header{crypto.SSECAlgorithm: []string{crypto.SSEAlgorithmAES256}}},
+		info:    ObjectInfo{Size: 0, UserDefined: map[string]string{crypto.MetaAlgorithm: crypto.InsecureSealAlgorithm}},
+		request: &http.Request{Header: http.Header{xhttp.AmzServerSideEncryption: []string{xhttp.AmzEncryptionAES}}},
 		expErr:  nil,
 	},
 	{
-		info:    ObjectInfo{Size: 100, UserDefined: map[string]string{crypto.SSECSealedKey: "EAAfAAAAAAD7v1hQq3PFRUHsItalxmrJqrOq6FwnbXNarxOOpb8jTWONPPKyM3Gfjkjyj6NCf+aB/VpHCLCTBA=="}},
+		info:    ObjectInfo{Size: 100, UserDefined: map[string]string{crypto.MetaSealedKeySSEC: "EAAfAAAAAAD7v1hQq3PFRUHsItalxmrJqrOq6FwnbXNarxOOpb8jTWONPPKyM3Gfjkjyj6NCf+aB/VpHCLCTBA=="}},
 		request: &http.Request{Header: http.Header{}},
 		expErr:  errEncryptedObject,
 	},
 	{
 		info:    ObjectInfo{Size: 100, UserDefined: map[string]string{}},
-		request: &http.Request{Method: http.MethodGet, Header: http.Header{crypto.SSECAlgorithm: []string{crypto.SSEAlgorithmAES256}}},
+		request: &http.Request{Method: http.MethodGet, Header: http.Header{xhttp.AmzServerSideEncryptionCustomerAlgorithm: []string{xhttp.AmzEncryptionAES}}},
 		expErr:  errInvalidEncryptionParameters,
 	},
 	{
 		info:    ObjectInfo{Size: 100, UserDefined: map[string]string{}},
-		request: &http.Request{Method: http.MethodHead, Header: http.Header{crypto.SSECAlgorithm: []string{crypto.SSEAlgorithmAES256}}},
+		request: &http.Request{Method: http.MethodHead, Header: http.Header{xhttp.AmzServerSideEncryptionCustomerAlgorithm: []string{xhttp.AmzEncryptionAES}}},
 		expErr:  errInvalidEncryptionParameters,
 	},
 	{
-		info:    ObjectInfo{Size: 31, UserDefined: map[string]string{crypto.SSESealAlgorithm: crypto.InsecureSealAlgorithm}},
-		request: &http.Request{Header: http.Header{crypto.SSECAlgorithm: []string{crypto.SSEAlgorithmAES256}}},
+		info:    ObjectInfo{Size: 31, UserDefined: map[string]string{crypto.MetaAlgorithm: crypto.InsecureSealAlgorithm}},
+		request: &http.Request{Header: http.Header{xhttp.AmzServerSideEncryptionCustomerAlgorithm: []string{xhttp.AmzEncryptionAES}}},
 		expErr:  errObjectTampered,
 	},
 }
@@ -128,7 +126,7 @@ func TestDecryptObjectInfo(t *testing.T) {
 	for i, test := range decryptObjectInfoTests {
 		if encrypted, err := DecryptObjectInfo(&test.info, test.request); err != test.expErr {
 			t.Errorf("Test %d: Decryption returned wrong error code: got %d , want %d", i, err, test.expErr)
-		} else if enc := crypto.IsEncrypted(test.info.UserDefined); encrypted && enc != encrypted {
+		} else if _, enc := crypto.IsEncrypted(test.info.UserDefined); encrypted && enc != encrypted {
 			t.Errorf("Test %d: Decryption thinks object is encrypted but it is not", i)
 		} else if !encrypted && enc != encrypted {
 			t.Errorf("Test %d: Decryption thinks object is not encrypted but it is", i)
@@ -221,10 +219,10 @@ func TestGetDecryptedRange_Issue50(t *testing.T) {
 		Name:   "object",
 		Size:   595160760,
 		UserDefined: map[string]string{
-			crypto.SSEMultipart:                    "",
-			crypto.SSEIV:                           "HTexa=",
-			crypto.SSESealAlgorithm:                "DAREv2-HMAC-SHA256",
-			crypto.SSECSealedKey:                   "IAA8PGAA==",
+			crypto.MetaMultipart:                   "",
+			crypto.MetaIV:                          "HTexa=",
+			crypto.MetaAlgorithm:                   "DAREv2-HMAC-SHA256",
+			crypto.MetaSealedKeySSEC:               "IAA8PGAA==",
 			ReservedMetadataPrefix + "actual-size": "594870264",
 			"content-type":                         "application/octet-stream",
 			"etag":                                 "166b1545b4c1535294ee0686678bea8c-2",
@@ -276,11 +274,11 @@ func TestGetDecryptedRange(t *testing.T) {
 		}
 		udMap = func(isMulti bool) map[string]string {
 			m := map[string]string{
-				crypto.SSESealAlgorithm: crypto.InsecureSealAlgorithm,
-				crypto.SSEMultipart:     "1",
+				crypto.MetaAlgorithm: crypto.InsecureSealAlgorithm,
+				crypto.MetaMultipart: "1",
 			}
 			if !isMulti {
-				delete(m, crypto.SSEMultipart)
+				delete(m, crypto.MetaMultipart)
 			}
 			return m
 		}
@@ -553,56 +551,56 @@ var getDefaultOptsTests = []struct {
 	encryptionType encrypt.Type
 	err            error
 }{
-	{headers: http.Header{crypto.SSECAlgorithm: []string{"AES256"},
-		crypto.SSECKey:    []string{"MzJieXRlc2xvbmdzZWNyZXRrZXltdXN0cHJvdmlkZWQ="},
-		crypto.SSECKeyMD5: []string{"7PpPLAK26ONlVUGOWlusfg=="}},
+	{headers: http.Header{xhttp.AmzServerSideEncryptionCustomerAlgorithm: []string{"AES256"},
+		xhttp.AmzServerSideEncryptionCustomerKey:    []string{"MzJieXRlc2xvbmdzZWNyZXRrZXltdXN0cHJvdmlkZWQ="},
+		xhttp.AmzServerSideEncryptionCustomerKeyMD5: []string{"7PpPLAK26ONlVUGOWlusfg=="}},
 		copySource:     false,
 		metadata:       nil,
 		encryptionType: encrypt.SSEC,
 		err:            nil}, // 0
-	{headers: http.Header{crypto.SSECAlgorithm: []string{"AES256"},
-		crypto.SSECKey:    []string{"MzJieXRlc2xvbmdzZWNyZXRrZXltdXN0cHJvdmlkZWQ="},
-		crypto.SSECKeyMD5: []string{"7PpPLAK26ONlVUGOWlusfg=="}},
+	{headers: http.Header{xhttp.AmzServerSideEncryptionCustomerAlgorithm: []string{"AES256"},
+		xhttp.AmzServerSideEncryptionCustomerKey:    []string{"MzJieXRlc2xvbmdzZWNyZXRrZXltdXN0cHJvdmlkZWQ="},
+		xhttp.AmzServerSideEncryptionCustomerKeyMD5: []string{"7PpPLAK26ONlVUGOWlusfg=="}},
 		copySource:     true,
 		metadata:       nil,
 		encryptionType: "",
 		err:            nil}, // 1
-	{headers: http.Header{crypto.SSECAlgorithm: []string{"AES256"},
-		crypto.SSECKey:    []string{"Mz"},
-		crypto.SSECKeyMD5: []string{"7PpPLAK26ONlVUGOWlusfg=="}},
+	{headers: http.Header{xhttp.AmzServerSideEncryptionCustomerAlgorithm: []string{"AES256"},
+		xhttp.AmzServerSideEncryptionCustomerKey:    []string{"Mz"},
+		xhttp.AmzServerSideEncryptionCustomerKeyMD5: []string{"7PpPLAK26ONlVUGOWlusfg=="}},
 		copySource:     false,
 		metadata:       nil,
 		encryptionType: "",
 		err:            crypto.ErrInvalidCustomerKey}, // 2
-	{headers: http.Header{crypto.SSEHeader: []string{"AES256"}},
+	{headers: http.Header{xhttp.AmzServerSideEncryption: []string{"AES256"}},
 		copySource:     false,
 		metadata:       nil,
 		encryptionType: encrypt.S3,
 		err:            nil}, // 3
 	{headers: http.Header{},
 		copySource: false,
-		metadata: map[string]string{crypto.S3SealedKey: base64.StdEncoding.EncodeToString(make([]byte, 64)),
-			crypto.S3KMSKeyID:     "kms-key",
-			crypto.S3KMSSealedKey: "m-key"},
+		metadata: map[string]string{crypto.MetaSealedKeyS3: base64.StdEncoding.EncodeToString(make([]byte, 64)),
+			crypto.MetaKeyID:             "kms-key",
+			crypto.MetaDataEncryptionKey: "m-key"},
 		encryptionType: encrypt.S3,
 		err:            nil}, // 4
 	{headers: http.Header{},
 		copySource: true,
-		metadata: map[string]string{crypto.S3SealedKey: base64.StdEncoding.EncodeToString(make([]byte, 64)),
-			crypto.S3KMSKeyID:     "kms-key",
-			crypto.S3KMSSealedKey: "m-key"},
+		metadata: map[string]string{crypto.MetaSealedKeyS3: base64.StdEncoding.EncodeToString(make([]byte, 64)),
+			crypto.MetaKeyID:             "kms-key",
+			crypto.MetaDataEncryptionKey: "m-key"},
 		encryptionType: "",
 		err:            nil}, // 5
-	{headers: http.Header{crypto.SSECopyAlgorithm: []string{"AES256"},
-		crypto.SSECopyKey:    []string{"MzJieXRlc2xvbmdzZWNyZXRrZXltdXN0cHJvdmlkZWQ="},
-		crypto.SSECopyKeyMD5: []string{"7PpPLAK26ONlVUGOWlusfg=="}},
+	{headers: http.Header{xhttp.AmzServerSideEncryptionCopyCustomerAlgorithm: []string{"AES256"},
+		xhttp.AmzServerSideEncryptionCopyCustomerKey:    []string{"MzJieXRlc2xvbmdzZWNyZXRrZXltdXN0cHJvdmlkZWQ="},
+		xhttp.AmzServerSideEncryptionCopyCustomerKeyMD5: []string{"7PpPLAK26ONlVUGOWlusfg=="}},
 		copySource:     true,
 		metadata:       nil,
 		encryptionType: encrypt.SSEC,
 		err:            nil}, // 6
-	{headers: http.Header{crypto.SSECopyAlgorithm: []string{"AES256"},
-		crypto.SSECopyKey:    []string{"MzJieXRlc2xvbmdzZWNyZXRrZXltdXN0cHJvdmlkZWQ="},
-		crypto.SSECopyKeyMD5: []string{"7PpPLAK26ONlVUGOWlusfg=="}},
+	{headers: http.Header{xhttp.AmzServerSideEncryptionCopyCustomerAlgorithm: []string{"AES256"},
+		xhttp.AmzServerSideEncryptionCopyCustomerKey:    []string{"MzJieXRlc2xvbmdzZWNyZXRrZXltdXN0cHJvdmlkZWQ="},
+		xhttp.AmzServerSideEncryptionCopyCustomerKeyMD5: []string{"7PpPLAK26ONlVUGOWlusfg=="}},
 		copySource:     false,
 		metadata:       nil,
 		encryptionType: "",
@@ -618,97 +616,10 @@ func TestGetDefaultOpts(t *testing.T) {
 		if err == nil {
 			if opts.ServerSideEncryption == nil && test.encryptionType != "" {
 				t.Errorf("Case %d: expected opts to be of %v encryption type", i, test.encryptionType)
-
 			}
 			if opts.ServerSideEncryption != nil && test.encryptionType != opts.ServerSideEncryption.Type() {
 				t.Errorf("Case %d: expected opts to have encryption type %v but was %v ", i, test.encryptionType, opts.ServerSideEncryption.Type())
 			}
 		}
 	}
-}
-func Test_decryptObjectInfo(t *testing.T) {
-	var testSet []struct {
-		Bucket  string
-		Name    string
-		UserDef map[string]string
-	}
-	file, err := os.Open("testdata/decryptObjectInfo.json.zst")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	dec, err := zstd.NewReader(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer dec.Close()
-	js := json.NewDecoder(dec)
-	err = js.Decode(&testSet)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	os.Setenv("MINIO_KMS_MASTER_KEY", "my-minio-key:6368616e676520746869732070617373776f726420746f206120736563726574")
-	defer os.Setenv("MINIO_KMS_MASTER_KEY", "")
-	GlobalKMS, err = crypto.NewKMS(crypto.KMSConfig{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var dst [32]byte
-	for i := range testSet {
-		t.Run(fmt.Sprint("case-", i), func(t *testing.T) {
-			test := &testSet[i]
-			_, err := decryptObjectInfo(dst[:], test.Bucket, test.Name, test.UserDef)
-			if err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
-func Benchmark_decryptObjectInfo(b *testing.B) {
-	var testSet []struct {
-		Bucket  string
-		Name    string
-		UserDef map[string]string
-	}
-	file, err := os.Open("testdata/decryptObjectInfo.json.zst")
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer file.Close()
-	dec, err := zstd.NewReader(file)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer dec.Close()
-	js := json.NewDecoder(dec)
-	err = js.Decode(&testSet)
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	os.Setenv("MINIO_KMS_MASTER_KEY", "my-minio-key:6368616e676520746869732070617373776f726420746f206120736563726574")
-	defer os.Setenv("MINIO_KMS_MASTER_KEY", "")
-	GlobalKMS, err = crypto.NewKMS(crypto.KMSConfig{})
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	b.SetBytes(int64(len(testSet)))
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			var dst [32]byte
-			for i := range testSet {
-				test := &testSet[i]
-				_, err := decryptObjectInfo(dst[:], test.Bucket, test.Name, test.UserDef)
-				if err != nil {
-					b.Fatal(err)
-				}
-			}
-		}
-	})
 }

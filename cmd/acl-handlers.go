@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2018-2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -20,7 +21,6 @@ import (
 	"encoding/xml"
 	"io"
 	"net/http"
-	"net/url"
 
 	"github.com/gorilla/mux"
 	xhttp "github.com/minio/minio/cmd/http"
@@ -61,7 +61,7 @@ type accessControlPolicy struct {
 func (api objectAPIHandlers) PutBucketACLHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "PutBucketACL")
 
-	defer logger.AuditLog(w, r, "PutBucketACL", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -125,7 +125,7 @@ func (api objectAPIHandlers) PutBucketACLHandler(w http.ResponseWriter, r *http.
 func (api objectAPIHandlers) GetBucketACLHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "GetBucketACL")
 
-	defer logger.AuditLog(w, r, "GetBucketACL", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -176,11 +176,11 @@ func (api objectAPIHandlers) GetBucketACLHandler(w http.ResponseWriter, r *http.
 func (api objectAPIHandlers) PutObjectACLHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "PutObjectACL")
 
-	defer logger.AuditLog(w, r, "PutObjectACL", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
-	object, err := url.PathUnescape(vars["object"])
+	object, err := unescapePath(vars["object"])
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
@@ -240,11 +240,11 @@ func (api objectAPIHandlers) PutObjectACLHandler(w http.ResponseWriter, r *http.
 func (api objectAPIHandlers) GetObjectACLHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "GetObjectACL")
 
-	defer logger.AuditLog(w, r, "GetObjectACL", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
-	object, err := url.PathUnescape(vars["object"])
+	object, err := unescapePath(vars["object"])
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return

@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2019 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package lifecycle
 
@@ -38,6 +39,7 @@ type Rule struct {
 	ID         string     `xml:"ID,omitempty"`
 	Status     Status     `xml:"Status"`
 	Filter     Filter     `xml:"Filter,omitempty"`
+	Prefix     Prefix     `xml:"Prefix,omitempty"`
 	Expiration Expiration `xml:"Expiration,omitempty"`
 	Transition Transition `xml:"Transition,omitempty"`
 	// FIXME: add a type to catch unsupported AbortIncompleteMultipartUpload AbortIncompleteMultipartUpload `xml:"AbortIncompleteMultipartUpload,omitempty"`
@@ -92,27 +94,44 @@ func (r Rule) validateStatus() error {
 	return nil
 }
 
-func (r Rule) validateAction() error {
+func (r Rule) validateExpiration() error {
 	return r.Expiration.Validate()
 }
 
-func (r Rule) validateFilter() error {
-	return r.Filter.Validate()
+func (r Rule) validateNoncurrentExpiration() error {
+	return r.NoncurrentVersionExpiration.Validate()
+}
+
+func (r Rule) validatePrefixAndFilter() error {
+	if !r.Prefix.set && r.Filter.IsEmpty() || r.Prefix.set && !r.Filter.IsEmpty() {
+		return errXMLNotWellFormed
+	}
+	if !r.Prefix.set {
+		return r.Filter.Validate()
+	}
+	return nil
 }
 
 func (r Rule) validateTransition() error {
 	return r.Transition.Validate()
 }
 
-// Prefix - a rule can either have prefix under <filter></filter> or under
-// <filter><and></and></filter>. This method returns the prefix from the
-// location where it is available
-func (r Rule) Prefix() string {
-	if r.Filter.Prefix != "" {
-		return r.Filter.Prefix
+func (r Rule) validateNoncurrentTransition() error {
+	return r.NoncurrentVersionTransition.Validate()
+}
+
+// GetPrefix - a rule can either have prefix under <rule></rule>, <filter></filter>
+// or under <filter><and></and></filter>. This method returns the prefix from the
+// location where it is available.
+func (r Rule) GetPrefix() string {
+	if p := r.Prefix.String(); p != "" {
+		return p
 	}
-	if r.Filter.And.Prefix != "" {
-		return r.Filter.And.Prefix
+	if p := r.Filter.Prefix.String(); p != "" {
+		return p
+	}
+	if p := r.Filter.And.Prefix.String(); p != "" {
+		return p
 	}
 	return ""
 }
@@ -145,14 +164,23 @@ func (r Rule) Validate() error {
 	if err := r.validateStatus(); err != nil {
 		return err
 	}
-	if err := r.validateAction(); err != nil {
+	if err := r.validateExpiration(); err != nil {
 		return err
 	}
-	if err := r.validateFilter(); err != nil {
+	if err := r.validateNoncurrentExpiration(); err != nil {
+		return err
+	}
+	if err := r.validatePrefixAndFilter(); err != nil {
 		return err
 	}
 	if err := r.validateTransition(); err != nil {
 		return err
+	}
+	if err := r.validateNoncurrentTransition(); err != nil {
+		return err
+	}
+	if !r.Expiration.set && !r.Transition.set && !r.NoncurrentVersionExpiration.set && !r.NoncurrentVersionTransition.set {
+		return errXMLNotWellFormed
 	}
 	return nil
 }

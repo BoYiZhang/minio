@@ -1,19 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2019 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package config
 
@@ -24,10 +24,10 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/minio/madmin-go"
 	"github.com/minio/minio-go/v7/pkg/set"
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/env"
-	"github.com/minio/minio/pkg/madmin"
 )
 
 // Error config error type
@@ -77,6 +77,7 @@ const (
 	LoggerWebhookSubSys  = "logger_webhook"
 	AuditWebhookSubSys   = "audit_webhook"
 	HealSubSys           = "heal"
+	ScannerSubSys        = "scanner"
 	CrawlerSubSys        = "crawler"
 
 	// Add new constants here if you add new fields to config.
@@ -114,7 +115,7 @@ var SubSystems = set.CreateStringSet(
 	PolicyOPASubSys,
 	IdentityLDAPSubSys,
 	IdentityOpenIDSubSys,
-	CrawlerSubSys,
+	ScannerSubSys,
 	HealSubSys,
 	NotifyAMQPSubSys,
 	NotifyESSubSys,
@@ -132,7 +133,7 @@ var SubSystems = set.CreateStringSet(
 var SubSystemsDynamic = set.CreateStringSet(
 	APISubSys,
 	CompressionSubSys,
-	CrawlerSubSys,
+	ScannerSubSys,
 	HealSubSys,
 )
 
@@ -151,7 +152,7 @@ var SubSystemsSingleTargets = set.CreateStringSet([]string{
 	IdentityLDAPSubSys,
 	IdentityOpenIDSubSys,
 	HealSubSys,
-	CrawlerSubSys,
+	ScannerSubSys,
 }...)
 
 // Constant separators
@@ -462,6 +463,13 @@ func LookupWorm() (bool, error) {
 	return ParseBool(env.Get(EnvWorm, EnableOff))
 }
 
+// Carries all the renamed sub-systems from their
+// previously known names
+var renamedSubsys = map[string]string{
+	CrawlerSubSys: ScannerSubSys,
+	// Add future sub-system renames
+}
+
 // Merge - merges a new config with all the
 // missing values for default configs,
 // returns a config.
@@ -477,9 +485,21 @@ func (c Config) Merge() Config {
 				}
 			}
 			if _, ok := cp[subSys]; !ok {
-				// A config subsystem was removed or server was downgraded.
-				Logger.Info("config: ignoring unknown subsystem config %q\n", subSys)
-				continue
+				rnSubSys, ok := renamedSubsys[subSys]
+				if !ok {
+					// A config subsystem was removed or server was downgraded.
+					Logger.Info("config: ignoring unknown subsystem config %q\n", subSys)
+					continue
+				}
+				// Copy over settings from previous sub-system
+				// to newly renamed sub-system
+				for _, kv := range cp[rnSubSys][Default] {
+					_, ok := c[subSys][tgt].Lookup(kv.Key)
+					if !ok {
+						ckvs.Set(kv.Key, kv.Value)
+					}
+				}
+				subSys = rnSubSys
 			}
 			cp[subSys][tgt] = ckvs
 		}

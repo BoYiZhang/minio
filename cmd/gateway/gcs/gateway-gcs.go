@@ -1,11 +1,11 @@
 /*
- * MinIO Cloud Storage, (C) 2017-2020 MinIO, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,27 +29,25 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"strconv"
-
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
 	humanize "github.com/dustin/go-humanize"
 	"github.com/minio/cli"
+	"github.com/minio/madmin-go"
 	miniogopolicy "github.com/minio/minio-go/v7/pkg/policy"
+	minio "github.com/minio/minio/cmd"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/bucket/policy"
 	"github.com/minio/minio/pkg/bucket/policy/condition"
 	"github.com/minio/minio/pkg/env"
-
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
-
-	minio "github.com/minio/minio/cmd"
 )
 
 var (
@@ -112,14 +110,14 @@ GOOGLE_APPLICATION_CREDENTIALS:
 EXAMPLES:
   1. Start minio gateway server for GCS backend
      {{.Prompt}} {{.EnvVarSetCommand}} GOOGLE_APPLICATION_CREDENTIALS{{.AssignmentOperator}}/path/to/credentials.json
-     {{.Prompt}} {{.EnvVarSetCommand}} MINIO_ACCESS_KEY{{.AssignmentOperator}}accesskey
-     {{.Prompt}} {{.EnvVarSetCommand}} MINIO_SECRET_KEY{{.AssignmentOperator}}secretkey
+     {{.Prompt}} {{.EnvVarSetCommand}} MINIO_ROOT_USER{{.AssignmentOperator}}accesskey
+     {{.Prompt}} {{.EnvVarSetCommand}} MINIO_ROOT_PASSWORD{{.AssignmentOperator}}secretkey
      {{.Prompt}} {{.HelpName}} mygcsprojectid
 
   2. Start minio gateway server for GCS backend with edge caching enabled
      {{.Prompt}} {{.EnvVarSetCommand}} GOOGLE_APPLICATION_CREDENTIALS{{.AssignmentOperator}}/path/to/credentials.json
-     {{.Prompt}} {{.EnvVarSetCommand}} MINIO_ACCESS_KEY{{.AssignmentOperator}}accesskey
-     {{.Prompt}} {{.EnvVarSetCommand}} MINIO_SECRET_KEY{{.AssignmentOperator}}secretkey
+     {{.Prompt}} {{.EnvVarSetCommand}} MINIO_ROOT_USER{{.AssignmentOperator}}accesskey
+     {{.Prompt}} {{.EnvVarSetCommand}} MINIO_ROOT_PASSWORD{{.AssignmentOperator}}secretkey
      {{.Prompt}} {{.EnvVarSetCommand}} MINIO_CACHE_DRIVES{{.AssignmentOperator}}"/mnt/drive1,/mnt/drive2,/mnt/drive3,/mnt/drive4"
      {{.Prompt}} {{.EnvVarSetCommand}} MINIO_CACHE_EXCLUDE{{.AssignmentOperator}}"bucket1/*;*.png"
      {{.Prompt}} {{.EnvVarSetCommand}} MINIO_CACHE_AFTER{{.AssignmentOperator}}3
@@ -341,7 +339,7 @@ type gcsGateway struct {
 	minio.GatewayUnsupported
 	client     *storage.Client
 	httpClient *http.Client
-	metrics    *minio.Metrics
+	metrics    *minio.BackendMetrics
 	projectID  string
 }
 
@@ -359,7 +357,7 @@ func gcsParseProjectID(credsFile string) (projectID string, err error) {
 }
 
 // GetMetrics returns this gateway's metrics
-func (l *gcsGateway) GetMetrics(ctx context.Context) (*minio.Metrics, error) {
+func (l *gcsGateway) GetMetrics(ctx context.Context) (*minio.BackendMetrics, error) {
 	return l.metrics, nil
 }
 
@@ -412,8 +410,8 @@ func (l *gcsGateway) Shutdown(ctx context.Context) error {
 }
 
 // StorageInfo - Not relevant to GCS backend.
-func (l *gcsGateway) StorageInfo(ctx context.Context, _ bool) (si minio.StorageInfo, _ []error) {
-	si.Backend.Type = minio.BackendGateway
+func (l *gcsGateway) StorageInfo(ctx context.Context) (si minio.StorageInfo, _ []error) {
+	si.Backend.Type = madmin.Gateway
 	si.Backend.GatewayOnline = minio.IsBackendOnline(ctx, "storage.googleapis.com:443")
 	return si, nil
 }
@@ -751,7 +749,7 @@ func (l *gcsGateway) GetObjectNInfo(ctx context.Context, bucket, object string, 
 
 	pr, pw := io.Pipe()
 	go func() {
-		err := l.GetObject(ctx, bucket, object, startOffset, length, pw, objInfo.ETag, opts)
+		err := l.getObject(ctx, bucket, object, startOffset, length, pw, objInfo.ETag, opts)
 		pw.CloseWithError(err)
 	}()
 	// Setup cleanup function to cause the above go-routine to
@@ -766,7 +764,7 @@ func (l *gcsGateway) GetObjectNInfo(ctx context.Context, bucket, object string, 
 //
 // startOffset indicates the starting read location of the object.
 // length indicates the total length of the object.
-func (l *gcsGateway) GetObject(ctx context.Context, bucket string, key string, startOffset int64, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) error {
+func (l *gcsGateway) getObject(ctx context.Context, bucket string, key string, startOffset int64, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) error {
 	// if we want to mimic S3 behavior exactly, we need to verify if bucket exists first,
 	// otherwise gcs will just return object not exist in case of non-existing bucket
 	if _, err := l.client.Bucket(bucket).Attrs(ctx); err != nil {

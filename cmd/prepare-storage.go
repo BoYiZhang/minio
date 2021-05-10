@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2016 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -125,16 +126,8 @@ func formatErasureCleanupTmpLocalEndpoints(endpoints Endpoints) error {
 					osErrToFileErr(err))
 			}
 
-			// Move .minio.sys/buckets/.minio.sys/metacache transient list cache
-			// folder to speed up startup routines.
-			tmpMetacacheOld := pathJoin(epPath, minioMetaTmpBucket+"-old", mustGetUUID())
-			if err := renameAll(pathJoin(epPath, minioMetaBucket, metacachePrefixForID(minioMetaBucket, "")),
-				tmpMetacacheOld); err != nil && err != errFileNotFound {
-				return fmt.Errorf("unable to rename (%s -> %s) %w",
-					pathJoin(epPath, minioMetaBucket+metacachePrefixForID(minioMetaBucket, "")),
-					tmpMetacacheOld,
-					osErrToFileErr(err))
-			}
+			// Renames and schedules for puring all bucket metacache.
+			renameAllBucketMetacache(epPath)
 
 			// Removal of tmp-old folder is backgrounded completely.
 			go removeAll(pathJoin(epPath, minioMetaTmpBucket+"-old"))
@@ -163,9 +156,9 @@ func formatErasureCleanupTmpLocalEndpoints(endpoints Endpoints) error {
 // https://github.com/minio/minio/issues/5667
 var errErasureV3ThisEmpty = fmt.Errorf("Erasure format version 3 has This field empty")
 
-// IsServerResolvable - checks if the endpoint is resolvable
+// isServerResolvable - checks if the endpoint is resolvable
 // by sending a naked HTTP request with liveness checks.
-func IsServerResolvable(endpoint Endpoint) error {
+func isServerResolvable(endpoint Endpoint, timeout time.Duration) error {
 	serverURL := &url.URL{
 		Scheme: endpoint.Scheme,
 		Host:   endpoint.Host,
@@ -173,10 +166,9 @@ func IsServerResolvable(endpoint Endpoint) error {
 	}
 
 	var tlsConfig *tls.Config
-	if globalIsSSL {
+	if globalIsTLS {
 		tlsConfig = &tls.Config{
-			ServerName: endpoint.Hostname(),
-			RootCAs:    globalRootCAs,
+			RootCAs: globalRootCAs,
 		}
 	}
 
@@ -199,7 +191,7 @@ func IsServerResolvable(endpoint Endpoint) error {
 	}
 	defer httpClient.CloseIdleConnections()
 
-	ctx, cancel := context.WithTimeout(GlobalContext, 3*time.Second)
+	ctx, cancel := context.WithTimeout(GlobalContext, timeout)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, serverURL.String(), nil)
 	if err != nil {
@@ -214,21 +206,13 @@ func IsServerResolvable(endpoint Endpoint) error {
 	}
 	xhttp.DrainBody(resp.Body)
 
-	if resp.StatusCode != http.StatusOK {
-		return StorageErr(resp.Status)
-	}
-
-	if resp.Header.Get(xhttp.MinIOServerStatus) == unavailable {
-		return StorageErr(unavailable)
-	}
-
 	return nil
 }
 
 // connect to list of endpoints and load all Erasure disk formats, validate the formats are correct
 // and are in quorum, if no formats are found attempt to initialize all of them for the first
 // time. additionally make sure to close all the disks used in this attempt.
-func connectLoadInitFormats(retryCount int, firstDisk bool, endpoints Endpoints, zoneCount, setCount, setDriveCount int, deploymentID string) (storageDisks []StorageAPI, format *formatErasureV3, err error) {
+func connectLoadInitFormats(retryCount int, firstDisk bool, endpoints Endpoints, poolCount, setCount, setDriveCount int, deploymentID, distributionAlgo string) (storageDisks []StorageAPI, format *formatErasureV3, err error) {
 	// Initialize all storage disks
 	storageDisks, errs := initStorageDisksWithErrors(endpoints)
 
@@ -244,7 +228,7 @@ func connectLoadInitFormats(retryCount int, firstDisk bool, endpoints Endpoints,
 				return nil, nil, fmt.Errorf("Disk %s: %w", endpoints[i], err)
 			}
 			if retryCount >= 5 {
-				logger.Info("Unable to connect to %s: %v\n", endpoints[i], IsServerResolvable(endpoints[i]))
+				logger.Info("Unable to connect to %s: %v\n", endpoints[i], isServerResolvable(endpoints[i], time.Second))
 			}
 		}
 	}
@@ -266,17 +250,17 @@ func connectLoadInitFormats(retryCount int, firstDisk bool, endpoints Endpoints,
 	// most part unless one of the formats is not consistent
 	// with expected Erasure format. For example if a user is
 	// trying to pool FS backend into an Erasure set.
-	if err = checkFormatErasureValues(formatConfigs, setDriveCount); err != nil {
+	if err = checkFormatErasureValues(formatConfigs, storageDisks, setDriveCount); err != nil {
 		return nil, nil, err
 	}
 
 	// All disks report unformatted we should initialized everyone.
 	if shouldInitErasureDisks(sErrs) && firstDisk {
-		logger.Info("Formatting %s zone, %v set(s), %v drives per set.",
-			humanize.Ordinal(zoneCount), setCount, setDriveCount)
+		logger.Info("Formatting %s pool, %v set(s), %v drives per set.",
+			humanize.Ordinal(poolCount), setCount, setDriveCount)
 
 		// Initialize erasure code format on disks
-		format, err = initFormatErasure(GlobalContext, storageDisks, setCount, setDriveCount, "", deploymentID, sErrs)
+		format, err = initFormatErasure(GlobalContext, storageDisks, setCount, setDriveCount, deploymentID, distributionAlgo, sErrs)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -345,7 +329,7 @@ func connectLoadInitFormats(retryCount int, firstDisk bool, endpoints Endpoints,
 }
 
 // Format disks before initialization of object layer.
-func waitForFormatErasure(firstDisk bool, endpoints Endpoints, zoneCount, setCount, setDriveCount int, deploymentID string) ([]StorageAPI, *formatErasureV3, error) {
+func waitForFormatErasure(firstDisk bool, endpoints Endpoints, poolCount, setCount, setDriveCount int, deploymentID, distributionAlgo string) ([]StorageAPI, *formatErasureV3, error) {
 	if len(endpoints) == 0 || setCount == 0 || setDriveCount == 0 {
 		return nil, nil, errInvalidArgument
 	}
@@ -372,7 +356,7 @@ func waitForFormatErasure(firstDisk bool, endpoints Endpoints, zoneCount, setCou
 	for {
 		select {
 		case <-ticker.C:
-			storageDisks, format, err := connectLoadInitFormats(tries, firstDisk, endpoints, zoneCount, setCount, setDriveCount, deploymentID)
+			storageDisks, format, err := connectLoadInitFormats(tries, firstDisk, endpoints, poolCount, setCount, setDriveCount, deploymentID, distributionAlgo)
 			if err != nil {
 				tries++
 				switch err {

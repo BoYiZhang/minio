@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -230,7 +231,8 @@ func (w *metacacheWriter) Reset(out io.Writer) {
 }
 
 var s2DecPool = sync.Pool{New: func() interface{} {
-	return s2.NewReader(nil)
+	// Default alloc block for network transfer.
+	return s2.NewReader(nil, s2.ReaderAllocBlock(16<<10))
 }}
 
 // metacacheReader allows reading a cache stream.
@@ -519,7 +521,7 @@ func (r *metacacheReader) readN(n int, inclDeleted, inclDirs bool, prefix string
 		if !inclDirs && meta.isDir() {
 			continue
 		}
-		if meta.isDir() && !inclDeleted && meta.isLatestDeletemarker() {
+		if !inclDeleted && meta.isLatestDeletemarker() {
 			continue
 		}
 		res = append(res, meta)
@@ -745,6 +747,12 @@ type metacacheBlockWriter struct {
 	blockEntries int
 }
 
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
+}
+
 // newMetacacheBlockWriter provides a streaming block writer.
 // Each block is the size of the capacity of the input channel.
 // The caller should close to indicate the stream has ended.
@@ -755,12 +763,15 @@ func newMetacacheBlockWriter(in <-chan metaCacheEntry, nextBlock func(b *metacac
 		defer w.wg.Done()
 		var current metacacheBlock
 		var n int
-		var buf bytes.Buffer
-		block := newMetacacheWriter(&buf, 1<<20)
+		buf := bufferPool.Get().(*bytes.Buffer)
+		defer func() {
+			buf.Reset()
+			bufferPool.Put(buf)
+		}()
+		block := newMetacacheWriter(buf, 1<<20)
 		defer block.Close()
 		finishBlock := func() {
-			err := block.Close()
-			if err != nil {
+			if err := block.Close(); err != nil {
 				w.streamErr = err
 				return
 			}
@@ -769,7 +780,7 @@ func newMetacacheBlockWriter(in <-chan metaCacheEntry, nextBlock func(b *metacac
 			// Prepare for next
 			current.n++
 			buf.Reset()
-			block.Reset(&buf)
+			block.Reset(buf)
 			current.First = ""
 		}
 		for o := range in {

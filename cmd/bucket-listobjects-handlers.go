@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2016 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -26,32 +27,25 @@ import (
 	"github.com/minio/minio/cmd/logger"
 
 	"github.com/minio/minio/pkg/bucket/policy"
-	"github.com/minio/minio/pkg/handlers"
 	"github.com/minio/minio/pkg/sync/errgroup"
 )
 
 func concurrentDecryptETag(ctx context.Context, objects []ObjectInfo) {
-	inParallel := func(objects []ObjectInfo) {
-		g := errgroup.WithNErrs(len(objects))
-		for index := range objects {
-			index := index
-			g.Go(func() error {
-				objects[index].ETag = objects[index].GetActualETag(nil)
-				objects[index].Size, _ = objects[index].GetActualSize()
-				return nil
-			}, index)
-		}
-		g.Wait()
+	g := errgroup.WithNErrs(len(objects)).WithConcurrency(500)
+	_, cancel := g.WithCancelOnError(ctx)
+	defer cancel()
+	for index := range objects {
+		index := index
+		g.Go(func() error {
+			size, err := objects[index].GetActualSize()
+			if err == nil {
+				objects[index].Size = size
+			}
+			objects[index].ETag = objects[index].GetActualETag(nil)
+			return nil
+		}, index)
 	}
-	const maxConcurrent = 500
-	for {
-		if len(objects) < maxConcurrent {
-			inParallel(objects)
-			return
-		}
-		inParallel(objects[:maxConcurrent])
-		objects = objects[maxConcurrent:]
-	}
+	g.WaitErr()
 }
 
 // Validate all the ListObjects query arguments, returns an APIErrorCode
@@ -82,7 +76,7 @@ func validateListObjectsArgs(marker, delimiter, encodingType string, maxKeys int
 func (api objectAPIHandlers) ListObjectVersionsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "ListObjectVersions")
 
-	defer logger.AuditLog(w, r, "ListObjectVersions", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -143,7 +137,7 @@ func (api objectAPIHandlers) ListObjectVersionsHandler(w http.ResponseWriter, r 
 func (api objectAPIHandlers) ListObjectsV2MHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "ListObjectsV2M")
 
-	defer logger.AuditLog(w, r, "ListObjectsV2M", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -210,7 +204,7 @@ func (api objectAPIHandlers) ListObjectsV2MHandler(w http.ResponseWriter, r *htt
 func (api objectAPIHandlers) ListObjectsV2Handler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "ListObjectsV2")
 
-	defer logger.AuditLog(w, r, "ListObjectsV2", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -301,10 +295,6 @@ func proxyRequestByNodeIndex(ctx context.Context, w http.ResponseWriter, r *http
 	return proxyRequest(ctx, w, r, ep)
 }
 
-func proxyRequestByStringHash(ctx context.Context, w http.ResponseWriter, r *http.Request, str string) (success bool) {
-	return proxyRequestByNodeIndex(ctx, w, r, crcHashMod(str, len(globalProxyEndpoints)))
-}
-
 // ListObjectsV1Handler - GET Bucket (List Objects) Version 1.
 // --------------------------
 // This implementation of the GET operation returns some or all (up to 10000)
@@ -314,7 +304,7 @@ func proxyRequestByStringHash(ctx context.Context, w http.ResponseWriter, r *htt
 func (api objectAPIHandlers) ListObjectsV1Handler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "ListObjectsV1")
 
-	defer logger.AuditLog(w, r, "ListObjectsV1", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -340,15 +330,6 @@ func (api objectAPIHandlers) ListObjectsV1Handler(w http.ResponseWriter, r *http
 	// Validate all the query params before beginning to serve the request.
 	if s3Error := validateListObjectsArgs(marker, delimiter, encodingType, maxKeys); s3Error != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL, guessIsBrowserReq(r))
-		return
-	}
-
-	// Forward the request using Source IP or bucket
-	forwardStr := handlers.GetSourceIPFromHeaders(r)
-	if forwardStr == "" {
-		forwardStr = bucket
-	}
-	if proxyRequestByStringHash(ctx, w, r, forwardStr) {
 		return
 	}
 

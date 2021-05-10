@@ -1,24 +1,24 @@
-/*
- * MinIO Cloud Storage, (C) 2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package http
 
 import (
 	"context"
-	"log"
 	"math/rand"
 	"net"
 	"sync"
@@ -45,7 +45,6 @@ func DialContextWithDNSCache(cache *DNSCache, baseDialCtx DialContext) DialConte
 		baseDialCtx = (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
-			DualStack: true,
 		}).DialContext
 	}
 	return func(ctx context.Context, network, host string) (net.Conn, error) {
@@ -96,15 +95,17 @@ type DNSCache struct {
 
 	lookupHostFn  func(ctx context.Context, host string) ([]string, error)
 	lookupTimeout time.Duration
+	loggerOnce    func(ctx context.Context, err error, id interface{}, errKind ...interface{})
 
-	cache  map[string][]string
-	closer func()
+	cache    map[string][]string
+	doneOnce sync.Once
+	doneCh   chan struct{}
 }
 
 // NewDNSCache initializes DNS cache resolver and starts auto refreshing
 // in a new goroutine. To stop auto refreshing, call `Stop()` function.
 // Once `Stop()` is called auto refreshing cannot be resumed.
-func NewDNSCache(freq time.Duration, lookupTimeout time.Duration) *DNSCache {
+func NewDNSCache(freq time.Duration, lookupTimeout time.Duration, loggerOnce func(ctx context.Context, err error, id interface{}, errKind ...interface{})) *DNSCache {
 	if freq <= 0 {
 		freq = defaultFreq
 	}
@@ -113,26 +114,30 @@ func NewDNSCache(freq time.Duration, lookupTimeout time.Duration) *DNSCache {
 		lookupTimeout = defaultLookupTimeout
 	}
 
-	ticker := time.NewTicker(freq)
-	ch := make(chan struct{})
-	closer := func() {
-		ticker.Stop()
-		close(ch)
-	}
-
 	r := &DNSCache{
 		lookupHostFn:  net.DefaultResolver.LookupHost,
 		lookupTimeout: lookupTimeout,
+		loggerOnce:    loggerOnce,
 		cache:         make(map[string][]string, cacheSize),
-		closer:        closer,
+		doneCh:        make(chan struct{}),
 	}
 
+	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	timer := time.NewTimer(freq)
 	go func() {
+		defer timer.Stop()
+
 		for {
 			select {
-			case <-ticker.C:
+			case <-timer.C:
+				// Make sure that refreshes on DNS do not be attempted
+				// at the same time, allows for reduced load on the
+				// DNS servers.
+				timer.Reset(time.Duration(rnd.Float64() * float64(freq)))
+
 				r.Refresh()
-			case <-ch:
+			case <-r.doneCh:
 				return
 			}
 		}
@@ -180,7 +185,7 @@ func (r *DNSCache) Refresh() {
 	for _, host := range hosts {
 		ctx, cancelF := context.WithTimeout(context.Background(), r.lookupTimeout)
 		if _, err := r.LookupHost(ctx, host); err != nil {
-			log.Println("failed to refresh DNS cache, resolver is unavailable", err)
+			r.loggerOnce(ctx, err, host)
 		}
 		cancelF()
 	}
@@ -188,10 +193,7 @@ func (r *DNSCache) Refresh() {
 
 // Stop stops auto refreshing.
 func (r *DNSCache) Stop() {
-	r.Lock()
-	defer r.Unlock()
-	if r.closer != nil {
-		r.closer()
-		r.closer = nil
-	}
+	r.doneOnce.Do(func() {
+		close(r.doneCh)
+	})
 }

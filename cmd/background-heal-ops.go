@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2019 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -20,8 +21,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/minio/madmin-go"
 	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/madmin"
 )
 
 // healTask represents what to heal along with options
@@ -61,23 +62,29 @@ func waitForLowHTTPReq(maxIO int, maxWait time.Duration) {
 	}
 
 	// At max 10 attempts to wait with 100 millisecond interval before proceeding
-	waitCount := 10
 	waitTick := 100 * time.Millisecond
 
 	// Bucket notification and http trace are not costly, it is okay to ignore them
 	// while counting the number of concurrent connections
 	maxIOFn := func() int {
-		return maxIO + globalHTTPListen.NumSubscribers() + globalHTTPTrace.NumSubscribers()
+		return maxIO + int(globalHTTPListen.NumSubscribers()) + int(globalTrace.NumSubscribers())
 	}
 
+	tmpMaxWait := maxWait
 	if httpServer := newHTTPServerFn(); httpServer != nil {
 		// Any requests in progress, delay the heal.
 		for httpServer.GetRequestCount() >= maxIOFn() {
-			time.Sleep(waitTick)
-			waitCount--
-			if waitCount == 0 {
+			if tmpMaxWait > 0 {
+				if tmpMaxWait < waitTick {
+					time.Sleep(tmpMaxWait)
+				} else {
+					time.Sleep(waitTick)
+				}
+				tmpMaxWait = tmpMaxWait - waitTick
+			}
+			if tmpMaxWait <= 0 {
 				if intDataUpdateTracker.debug {
-					logger.Info("waitForLowHTTPReq: waited %d times, resuming", waitCount)
+					logger.Info("waitForLowHTTPReq: waited max %s, resuming", maxWait)
 				}
 				break
 			}
@@ -91,20 +98,22 @@ func (h *healRoutine) run(ctx context.Context, objAPI ObjectLayer) {
 		select {
 		case task, ok := <-h.tasks:
 			if !ok {
-				break
+				return
 			}
 
 			var res madmin.HealResultItem
 			var err error
-			switch {
-			case task.bucket == nopHeal:
+			switch task.bucket {
+			case nopHeal:
 				continue
-			case task.bucket == SlashSeparator:
+			case SlashSeparator:
 				res, err = healDiskFormat(ctx, objAPI, task.opts)
-			case task.bucket != "" && task.object == "":
-				res, err = objAPI.HealBucket(ctx, task.bucket, task.opts)
-			case task.bucket != "" && task.object != "":
-				res, err = objAPI.HealObject(ctx, task.bucket, task.object, task.versionID, task.opts)
+			default:
+				if task.object == "" {
+					res, err = objAPI.HealBucket(ctx, task.bucket, task.opts)
+				} else {
+					res, err = objAPI.HealObject(ctx, task.bucket, task.object, task.versionID, task.opts)
+				}
 			}
 			task.responseCh <- healResult{result: res, err: err}
 

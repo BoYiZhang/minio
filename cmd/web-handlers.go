@@ -1,25 +1,26 @@
-/*
- * MinIO Cloud Storage, (C) 2016-2019 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -39,23 +40,23 @@ import (
 	miniogo "github.com/minio/minio-go/v7"
 	miniogopolicy "github.com/minio/minio-go/v7/pkg/policy"
 	"github.com/minio/minio-go/v7/pkg/s3utils"
-	"github.com/minio/minio/browser"
+
 	"github.com/minio/minio/cmd/config/dns"
 	"github.com/minio/minio/cmd/config/identity/openid"
 	"github.com/minio/minio/cmd/crypto"
 	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
-	"github.com/minio/minio/pkg/bucket/lifecycle"
 	objectlock "github.com/minio/minio/pkg/bucket/object/lock"
 	"github.com/minio/minio/pkg/bucket/policy"
 	"github.com/minio/minio/pkg/bucket/replication"
+	"github.com/minio/minio/pkg/etag"
 	"github.com/minio/minio/pkg/event"
 	"github.com/minio/minio/pkg/handlers"
 	"github.com/minio/minio/pkg/hash"
 	iampolicy "github.com/minio/minio/pkg/iam/policy"
 	"github.com/minio/minio/pkg/ioutil"
-	"github.com/minio/minio/pkg/rpc/json2"
+	"github.com/minio/rpc/json2"
 )
 
 func extractBucketObject(args reflect.Value) (bucketName, objectName string) {
@@ -77,7 +78,7 @@ func extractBucketObject(args reflect.Value) (bucketName, objectName string) {
 }
 
 // WebGenericArgs - empty struct for calls that don't accept arguments
-// for ex. ServerInfo, GenerateAuth
+// for ex. ServerInfo
 type WebGenericArgs struct{}
 
 // WebGenericRep - reply structure for calls for which reply is success/failure
@@ -131,7 +132,7 @@ func (web *webAPIHandlers) ServerInfo(r *http.Request, args *WebGenericArgs, rep
 
 	reply.MinioPlatform = platform
 	reply.MinioRuntime = goruntime
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	return nil
 }
 
@@ -154,7 +155,7 @@ func (web *webAPIHandlers) StorageInfo(r *http.Request, args *WebGenericArgs, re
 	}
 	dataUsageInfo, _ := loadDataUsageFromBackend(ctx, objectAPI)
 	reply.Used = dataUsageInfo.ObjectsTotalSize
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	return nil
 }
 
@@ -210,7 +211,7 @@ func (web *webAPIHandlers) MakeBucket(r *http.Request, args *MakeBucketArgs, rep
 					return toJSONError(ctx, err)
 				}
 
-				reply.UIVersion = browser.UIVersion
+				reply.UIVersion = Version
 				return nil
 			}
 			return toJSONError(ctx, err)
@@ -222,12 +223,15 @@ func (web *webAPIHandlers) MakeBucket(r *http.Request, args *MakeBucketArgs, rep
 		return toJSONError(ctx, err, args.BucketName)
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
+
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.GetAccessKey()
 
 	sendEvent(eventArgs{
 		EventName:  event.BucketCreated,
 		BucketName: args.BucketName,
-		ReqParams:  extractReqParams(r),
+		ReqParams:  reqParams,
 		UserAgent:  r.UserAgent(),
 		Host:       handlers.GetSourceIP(r),
 	})
@@ -269,7 +273,7 @@ func (web *webAPIHandlers) DeleteBucket(r *http.Request, args *RemoveBucketArgs,
 		return toJSONError(ctx, errInvalidBucketName, args.BucketName)
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 
 	if isRemoteCallRequired(ctx, args.BucketName, objectAPI) {
 		sr, err := globalDNSConfig.Get(args.BucketName)
@@ -306,10 +310,13 @@ func (web *webAPIHandlers) DeleteBucket(r *http.Request, args *RemoveBucketArgs,
 		}
 	}
 
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.AccessKey
+
 	sendEvent(eventArgs{
 		EventName:  event.BucketRemoved,
 		BucketName: args.BucketName,
-		ReqParams:  extractReqParams(r),
+		ReqParams:  reqParams,
 		UserAgent:  r.UserAgent(),
 		Host:       handlers.GetSourceIP(r),
 	})
@@ -354,7 +361,9 @@ func (web *webAPIHandlers) ListBuckets(r *http.Request, args *WebGenericArgs, re
 	// If etcd, dns federation configured list buckets from etcd.
 	if globalDNSConfig != nil && globalBucketFederation {
 		dnsBuckets, err := globalDNSConfig.List()
-		if err != nil && err != dns.ErrNoEntriesFound {
+		if err != nil && !IsErrIgnored(err,
+			dns.ErrNoEntriesFound,
+			dns.ErrDomainMissing) {
 			return toJSONError(ctx, err)
 		}
 		for _, dnsRecords := range dnsBuckets {
@@ -396,7 +405,7 @@ func (web *webAPIHandlers) ListBuckets(r *http.Request, args *WebGenericArgs, re
 		}
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	return nil
 }
 
@@ -429,7 +438,7 @@ type WebObjectInfo struct {
 // ListObjects - list objects api.
 func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, reply *ListObjectsRep) error {
 	ctx := newWebContext(r, args, "WebListObjects")
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
 		return toJSONError(ctx, errServerNotInitialized)
@@ -456,7 +465,7 @@ func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, r
 		// Fetch all the objects
 		for {
 			// Let listObjects reply back the maximum from server implementation
-			result, err := core.ListObjects(args.BucketName, args.Prefix, nextMarker, SlashSeparator, 0)
+			result, err := core.ListObjects(args.BucketName, args.Prefix, nextMarker, SlashSeparator, 1000)
 			if err != nil {
 				return toJSONError(ctx, err, args.BucketName)
 			}
@@ -570,11 +579,15 @@ func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, r
 	nextMarker := ""
 	// Fetch all the objects
 	for {
-		// Limit browser to 1000 batches to be more responsive, scrolling friendly.
+		// Limit browser to '1000' batches to be more responsive, scrolling friendly.
+		// Also don't change the maxKeys value silly GCS SDKs do not honor maxKeys
+		// values to be '-1'
 		lo, err := listObjects(ctx, args.BucketName, args.Prefix, nextMarker, SlashSeparator, 1000)
 		if err != nil {
 			return &json2.Error{Message: err.Error()}
 		}
+
+		nextMarker = lo.NextMarker
 		for i := range lo.Objects {
 			lo.Objects[i].Size, err = lo.Objects[i].GetActualSize()
 			if err != nil {
@@ -595,8 +608,6 @@ func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, r
 				Key: prefix,
 			})
 		}
-
-		nextMarker = lo.NextMarker
 
 		// Return when there are no more objects
 		if !lo.IsTruncated {
@@ -666,7 +677,7 @@ func (web *webAPIHandlers) RemoveObject(r *http.Request, args *RemoveObjectArgs,
 		return toJSONError(ctx, errInvalidBucketName, args.BucketName)
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	if isRemoteCallRequired(ctx, args.BucketName, objectAPI) {
 		sr, err := globalDNSConfig.Get(args.BucketName)
 		if err != nil {
@@ -706,7 +717,15 @@ func (web *webAPIHandlers) RemoveObject(r *http.Request, args *RemoveObjectArgs,
 		Versioned:        globalBucketVersioningSys.Enabled(args.BucketName),
 		VersionSuspended: globalBucketVersioningSys.Suspended(args.BucketName),
 	}
-	var err error
+	var (
+		err           error
+		replicateSync bool
+	)
+
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.GetAccessKey()
+	sourceIP := handlers.GetSourceIP(r)
+
 next:
 	for _, objectName := range args.Objects {
 		// If not a directory, remove the object.
@@ -746,17 +765,56 @@ next:
 			if _, err := globalBucketMetadataSys.GetLifecycleConfig(args.BucketName); err == nil {
 				hasLifecycleConfig = true
 			}
+			os := newObjSweeper(args.BucketName, objectName)
+			opts = os.GetOpts()
 			if hasReplicationRules(ctx, args.BucketName, []ObjectToDelete{{ObjectName: objectName}}) || hasLifecycleConfig {
 				goi, gerr = getObjectInfoFn(ctx, args.BucketName, objectName, opts)
-				if _, replicateDel = checkReplicateDelete(ctx, args.BucketName, ObjectToDelete{ObjectName: objectName}, goi, gerr); replicateDel {
+				if gerr == nil {
+					os.SetTransitionState(goi)
+				}
+				if replicateDel, replicateSync = checkReplicateDelete(ctx, args.BucketName, ObjectToDelete{
+					ObjectName: objectName,
+					VersionID:  goi.VersionID,
+				}, goi, gerr); replicateDel {
 					opts.DeleteMarkerReplicationStatus = string(replication.Pending)
 					opts.DeleteMarker = true
 				}
 			}
 
-			oi, err := deleteObject(ctx, objectAPI, web.CacheAPI(), args.BucketName, objectName, nil, r, opts)
-			if replicateDel && err == nil {
-				globalReplicationState.queueReplicaDeleteTask(DeletedObjectVersionInfo{
+			deleteObject := objectAPI.DeleteObject
+			if web.CacheAPI() != nil {
+				deleteObject = web.CacheAPI().DeleteObject
+			}
+
+			oi, err := deleteObject(ctx, args.BucketName, objectName, opts)
+			if err != nil {
+				switch err.(type) {
+				case BucketNotFound:
+					return toJSONError(ctx, err)
+				}
+			}
+			if oi.Name == "" {
+				logger.LogIf(ctx, err)
+				continue
+			}
+
+			eventName := event.ObjectRemovedDelete
+			if oi.DeleteMarker {
+				eventName = event.ObjectRemovedDeleteMarkerCreated
+			}
+
+			// Notify object deleted event.
+			sendEvent(eventArgs{
+				EventName:  eventName,
+				BucketName: args.BucketName,
+				Object:     oi,
+				ReqParams:  reqParams,
+				UserAgent:  r.UserAgent(),
+				Host:       sourceIP,
+			})
+
+			if replicateDel {
+				dobj := DeletedObjectVersionInfo{
 					DeletedObject: DeletedObject{
 						ObjectName:                    objectName,
 						DeleteMarkerVersionID:         oi.VersionID,
@@ -766,23 +824,12 @@ next:
 						VersionPurgeStatus:            oi.VersionPurgeStatus,
 					},
 					Bucket: args.BucketName,
-				})
-			}
-			if goi.TransitionStatus == lifecycle.TransitionComplete && err == nil && goi.VersionID == "" {
-				action := lifecycle.DeleteAction
-				if goi.VersionID != "" {
-					action = lifecycle.DeleteVersionAction
 				}
-				deleteTransitionedObject(ctx, newObjectLayerFn(), args.BucketName, objectName, lifecycle.ObjectOpts{
-					Name:         objectName,
-					UserTags:     goi.UserTags,
-					VersionID:    goi.VersionID,
-					DeleteMarker: goi.DeleteMarker,
-					IsLatest:     goi.IsLatest,
-				}, action, true)
+				scheduleReplicationDelete(ctx, dobj, objectAPI, replicateSync)
 			}
 
 			logger.LogIf(ctx, err)
+			logger.LogIf(ctx, os.Sweep())
 			continue
 		}
 
@@ -852,8 +899,8 @@ next:
 						}
 					}
 				}
+				replicateDel, _ := checkReplicateDelete(ctx, args.BucketName, ObjectToDelete{ObjectName: obj.Name, VersionID: obj.VersionID}, obj, nil)
 				// since versioned delete is not available on web browser, yet - this is a simple DeleteMarker replication
-				_, replicateDel := checkReplicateDelete(ctx, args.BucketName, ObjectToDelete{ObjectName: obj.Name}, obj, nil)
 				objToDel := ObjectToDelete{ObjectName: obj.Name}
 				if replicateDel {
 					objToDel.DeleteMarkerReplicationStatus = string(replication.Pending)
@@ -896,15 +943,16 @@ next:
 					EventName:  event.ObjectRemovedDelete,
 					BucketName: args.BucketName,
 					Object:     objInfo,
-					ReqParams:  extractReqParams(r),
+					ReqParams:  reqParams,
 					UserAgent:  r.UserAgent(),
-					Host:       handlers.GetSourceIP(r),
+					Host:       sourceIP,
 				})
 				if dobj.DeleteMarkerReplicationStatus == string(replication.Pending) || dobj.VersionPurgeStatus == Pending {
-					globalReplicationState.queueReplicaDeleteTask(DeletedObjectVersionInfo{
+					dv := DeletedObjectVersionInfo{
 						DeletedObject: dobj,
 						Bucket:        args.BucketName,
-					})
+					}
+					scheduleReplicationDelete(ctx, dv, objectAPI, replicateSync)
 				}
 			}
 		}
@@ -939,33 +987,7 @@ func (web *webAPIHandlers) Login(r *http.Request, args *LoginArgs, reply *LoginR
 	}
 
 	reply.Token = token
-	reply.UIVersion = browser.UIVersion
-	return nil
-}
-
-// GenerateAuthReply - reply for GenerateAuth
-type GenerateAuthReply struct {
-	AccessKey string `json:"accessKey"`
-	SecretKey string `json:"secretKey"`
-	UIVersion string `json:"uiVersion"`
-}
-
-func (web webAPIHandlers) GenerateAuth(r *http.Request, args *WebGenericArgs, reply *GenerateAuthReply) error {
-	ctx := newWebContext(r, args, "WebGenerateAuth")
-	_, owner, authErr := webRequestAuthenticate(r)
-	if authErr != nil {
-		return toJSONError(ctx, authErr)
-	}
-	if !owner {
-		return toJSONError(ctx, errAccessDenied)
-	}
-	cred, err := auth.GetNewCredentials()
-	if err != nil {
-		return toJSONError(ctx, err)
-	}
-	reply.AccessKey = cred.AccessKey
-	reply.SecretKey = cred.SecretKey
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	return nil
 }
 
@@ -997,6 +1019,17 @@ func (web *webAPIHandlers) SetAuth(r *http.Request, args *SetAuthArgs, reply *Se
 		return toJSONError(ctx, errChangeCredNotAllowed)
 	}
 
+	if !globalIAMSys.IsAllowed(iampolicy.Args{
+		AccountName:     claims.AccessKey,
+		Action:          iampolicy.CreateUserAdminAction,
+		IsOwner:         false,
+		ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+		Claims:          claims.Map(),
+		DenyOnly:        true,
+	}) {
+		return toJSONError(ctx, errChangeCredNotAllowed)
+	}
+
 	// for IAM users, access key cannot be updated
 	// claims.AccessKey is used instead of accesskey from args
 	prevCred, ok := globalIAMSys.GetUser(claims.AccessKey)
@@ -1005,7 +1038,7 @@ func (web *webAPIHandlers) SetAuth(r *http.Request, args *SetAuthArgs, reply *Se
 	}
 
 	// Throw error when wrong secret key is provided
-	if prevCred.SecretKey != args.CurrentSecretKey {
+	if subtle.ConstantTimeCompare([]byte(prevCred.SecretKey), []byte(args.CurrentSecretKey)) != 1 {
 		return errIncorrectCreds
 	}
 
@@ -1024,7 +1057,7 @@ func (web *webAPIHandlers) SetAuth(r *http.Request, args *SetAuthArgs, reply *Se
 		return toJSONError(ctx, err)
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 
 	return nil
 }
@@ -1063,7 +1096,7 @@ func (web *webAPIHandlers) CreateURLToken(r *http.Request, args *WebGenericArgs,
 		reply.Token = token
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	return nil
 }
 
@@ -1074,7 +1107,7 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 	// obtain the claims here if possible, for audit logging.
 	claims, owner, authErr := webRequestAuthenticate(r)
 
-	defer logger.AuditLog(w, r, "WebUpload", claims.Map())
+	defer logger.AuditLog(ctx, w, r, claims.Map())
 
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
@@ -1084,7 +1117,7 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
-	object, err := url.PathUnescape(vars["object"])
+	object, err := unescapePath(vars["object"])
 	if err != nil {
 		writeWebErrorResponse(w, err)
 		return
@@ -1170,7 +1203,7 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 	// Check if bucket encryption is enabled
 	_, err = globalBucketSSEConfigSys.Get(bucket)
 	if (globalAutoEncryption || err == nil) && !crypto.SSEC.IsRequested(r.Header) {
-		r.Header.Set(crypto.SSEHeader, crypto.SSEAlgorithmAES256)
+		r.Header.Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionKMS)
 	}
 
 	// Require Content-Length to be set in the request
@@ -1196,7 +1229,7 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 	var reader io.Reader = r.Body
 	actualSize := size
 
-	hashReader, err := hash.NewReader(reader, size, "", "", actualSize, globalCLIContext.StrictS3Compat)
+	hashReader, err := hash.NewReader(reader, size, "", "", actualSize)
 	if err != nil {
 		writeWebErrorResponse(w, err)
 		return
@@ -1205,9 +1238,9 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 	if objectAPI.IsCompressionSupported() && isCompressible(r.Header, object) && size > 0 {
 		// Storing the compression metadata.
 		metadata[ReservedMetadataPrefix+"compression"] = compressionAlgorithmV2
-		metadata[ReservedMetadataPrefix+"actual-size"] = strconv.FormatInt(size, 10)
+		metadata[ReservedMetadataPrefix+"actual-size"] = strconv.FormatInt(actualSize, 10)
 
-		actualReader, err := hash.NewReader(reader, size, "", "", actualSize, globalCLIContext.StrictS3Compat)
+		actualReader, err := hash.NewReader(reader, actualSize, "", "", actualSize)
 		if err != nil {
 			writeWebErrorResponse(w, err)
 			return
@@ -1215,21 +1248,21 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 
 		// Set compression metrics.
 		size = -1 // Since compressed size is un-predictable.
-		s2c := newS2CompressReader(actualReader)
+		s2c := newS2CompressReader(actualReader, actualSize)
 		defer s2c.Close()
-		reader = s2c
-		hashReader, err = hash.NewReader(reader, size, "", "", actualSize, globalCLIContext.StrictS3Compat)
+		reader = etag.Wrap(s2c, actualReader)
+		hashReader, err = hash.NewReader(reader, size, "", "", actualSize)
 		if err != nil {
 			writeWebErrorResponse(w, err)
 			return
 		}
 	}
 
-	mustReplicate := mustReplicateWeb(ctx, r, bucket, object, metadata, "", replPerms)
+	mustReplicate, sync := mustReplicateWeb(ctx, r, bucket, object, metadata, "", replPerms)
 	if mustReplicate {
 		metadata[xhttp.AmzBucketReplicationStatus] = string(replication.Pending)
 	}
-	pReader = NewPutObjReader(hashReader, nil, nil)
+	pReader = NewPutObjReader(hashReader)
 	// get gateway encryption options
 	opts, err := putOpts(ctx, r, bucket, object, metadata)
 	if err != nil {
@@ -1238,22 +1271,28 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if objectAPI.IsEncryptionSupported() {
-		if crypto.IsRequested(r.Header) && !HasSuffix(object, SlashSeparator) { // handle SSE requests
-			rawReader := hashReader
-			var objectEncryptionKey crypto.ObjectKey
-			reader, objectEncryptionKey, err = EncryptRequest(hashReader, r, bucket, object, metadata)
+		if _, ok := crypto.IsRequested(r.Header); ok && !HasSuffix(object, SlashSeparator) { // handle SSE requests
+			var (
+				objectEncryptionKey crypto.ObjectKey
+				encReader           io.Reader
+			)
+			encReader, objectEncryptionKey, err = EncryptRequest(hashReader, r, bucket, object, metadata)
 			if err != nil {
 				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 				return
 			}
 			info := ObjectInfo{Size: size}
 			// do not try to verify encrypted content
-			hashReader, err = hash.NewReader(reader, info.EncryptedSize(), "", "", size, globalCLIContext.StrictS3Compat)
+			hashReader, err = hash.NewReader(etag.Wrap(encReader, hashReader), info.EncryptedSize(), "", "", size)
 			if err != nil {
 				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 				return
 			}
-			pReader = NewPutObjReader(rawReader, hashReader, &objectEncryptionKey)
+			pReader, err = pReader.WithEncryption(hashReader, &objectEncryptionKey)
+			if err != nil {
+				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
+				return
+			}
 		}
 	}
 
@@ -1274,8 +1313,15 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if retentionMode != "" {
-		opts.UserDefined[xhttp.AmzObjectLockMode] = string(retentionMode)
-		opts.UserDefined[xhttp.AmzObjectLockRetainUntilDate] = retentionDate.UTC().Format(iso8601TimeFormat)
+		opts.UserDefined[strings.ToLower(xhttp.AmzObjectLockMode)] = string(retentionMode)
+		opts.UserDefined[strings.ToLower(xhttp.AmzObjectLockRetainUntilDate)] = retentionDate.UTC().Format(iso8601TimeFormat)
+	}
+
+	os := newObjSweeper(bucket, object)
+	// Get appropriate object info to identify the remote object to delete
+	goiOpts := os.GetOpts()
+	if goi, gerr := getObjectInfo(ctx, bucket, object, goiOpts); gerr == nil {
+		os.SetTransitionState(goi)
 	}
 
 	objInfo, err := putObject(GlobalContext, bucket, object, pReader, opts)
@@ -1284,26 +1330,33 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if objectAPI.IsEncryptionSupported() {
-		if crypto.IsEncrypted(objInfo.UserDefined) {
-			switch {
-			case crypto.S3.IsEncrypted(objInfo.UserDefined):
-				w.Header().Set(crypto.SSEHeader, crypto.SSEAlgorithmAES256)
-			case crypto.SSEC.IsRequested(r.Header):
-				w.Header().Set(crypto.SSECAlgorithm, r.Header.Get(crypto.SSECAlgorithm))
-				w.Header().Set(crypto.SSECKeyMD5, r.Header.Get(crypto.SSECKeyMD5))
+		switch kind, _ := crypto.IsEncrypted(objInfo.UserDefined); kind {
+		case crypto.S3:
+			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
+		case crypto.S3KMS:
+			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionKMS)
+			if kmsCtx, ok := objInfo.UserDefined[crypto.MetaContext]; ok {
+				w.Header().Set(xhttp.AmzServerSideEncryptionKmsContext, kmsCtx)
 			}
+		case crypto.SSEC:
+			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerAlgorithm, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerAlgorithm))
+			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerKeyMD5, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerKeyMD5))
 		}
 	}
 	if mustReplicate {
-		globalReplicationState.queueReplicaTask(objInfo)
+		scheduleReplication(ctx, objInfo.Clone(), objectAPI, sync, replication.ObjectReplicationType)
 	}
+	logger.LogIf(ctx, os.Sweep())
+
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.GetAccessKey()
 
 	// Notify object created event.
 	sendEvent(eventArgs{
 		EventName:    event.ObjectCreatedPut,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    reqParams,
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -1314,10 +1367,8 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "WebDownload")
 
-	vars := mux.Vars(r)
-
 	claims, owner, authErr := webTokenAuthenticate(r.URL.Query().Get("token"))
-	defer logger.AuditLog(w, r, "WebDownload", claims.Map())
+	defer logger.AuditLog(ctx, w, r, claims.Map())
 
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
@@ -1325,8 +1376,10 @@ func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	vars := mux.Vars(r)
+
 	bucket := vars["bucket"]
-	object, err := url.PathUnescape(vars["object"])
+	object, err := unescapePath(vars["object"])
 	if err != nil {
 		writeWebErrorResponse(w, err)
 		return
@@ -1443,14 +1496,17 @@ func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 
 	// Set encryption response headers
 	if objectAPI.IsEncryptionSupported() {
-		if crypto.IsEncrypted(objInfo.UserDefined) {
-			switch {
-			case crypto.S3.IsEncrypted(objInfo.UserDefined):
-				w.Header().Set(crypto.SSEHeader, crypto.SSEAlgorithmAES256)
-			case crypto.SSEC.IsEncrypted(objInfo.UserDefined):
-				w.Header().Set(crypto.SSECAlgorithm, r.Header.Get(crypto.SSECAlgorithm))
-				w.Header().Set(crypto.SSECKeyMD5, r.Header.Get(crypto.SSECKeyMD5))
+		switch kind, _ := crypto.IsEncrypted(objInfo.UserDefined); kind {
+		case crypto.S3:
+			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
+		case crypto.S3KMS:
+			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionKMS)
+			if kmsCtx, ok := objInfo.UserDefined[crypto.MetaContext]; ok {
+				w.Header().Set(xhttp.AmzServerSideEncryptionKmsContext, kmsCtx)
 			}
+		case crypto.SSEC:
+			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerAlgorithm, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerAlgorithm))
+			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerKeyMD5, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerKeyMD5))
 		}
 	}
 
@@ -1486,12 +1542,15 @@ func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.GetAccessKey()
+
 	// Notify object accessed via a GET request.
 	sendEvent(eventArgs{
 		EventName:    event.ObjectAccessedGet,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    reqParams,
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -1514,7 +1573,7 @@ func (web *webAPIHandlers) DownloadZip(w http.ResponseWriter, r *http.Request) {
 	claims, owner, authErr := webTokenAuthenticate(r.URL.Query().Get("token"))
 
 	ctx := newContext(r, w, "WebDownloadZip")
-	defer logger.AuditLog(w, r, "WebDownloadZip", claims.Map())
+	defer logger.AuditLog(ctx, w, r, claims.Map())
 
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
@@ -1638,7 +1697,14 @@ func (web *webAPIHandlers) DownloadZip(w http.ResponseWriter, r *http.Request) {
 	archive := zip.NewWriter(w)
 	defer archive.Close()
 
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.GetAccessKey()
+	respElements := extractRespElements(w)
+
 	for i, object := range args.Objects {
+		if contextCanceled(ctx) {
+			return
+		}
 		// Writes compressed object file to the response.
 		zipit := func(objectName string) error {
 			var opts ObjectOptions
@@ -1657,36 +1723,24 @@ func (web *webAPIHandlers) DownloadZip(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			header := &zip.FileHeader{
-				Name:     strings.TrimPrefix(objectName, args.Prefix),
-				Method:   zip.Deflate,
-				Flags:    1 << 11,
-				Modified: info.ModTime,
+				Name:               strings.TrimPrefix(objectName, args.Prefix),
+				Method:             zip.Deflate,
+				Flags:              1 << 11,
+				Modified:           info.ModTime,
+				UncompressedSize64: uint64(info.Size),
 			}
-			if hasStringSuffixInSlice(info.Name, standardExcludeCompressExtensions) || hasPattern(standardExcludeCompressContentTypes, info.ContentType) {
+			if info.Size < 20 || hasStringSuffixInSlice(info.Name, standardExcludeCompressExtensions) || hasPattern(standardExcludeCompressContentTypes, info.ContentType) {
 				// We strictly disable compression for standard extensions/content-types.
 				header.Method = zip.Store
 			}
 			writer, err := archive.CreateHeader(header)
 			if err != nil {
-				writeWebErrorResponse(w, errUnexpected)
 				return err
 			}
-			httpWriter := ioutil.WriteOnClose(writer)
 
 			// Write object content to response body
-			if _, err = io.Copy(httpWriter, gr); err != nil {
-				httpWriter.Close()
-				if !httpWriter.HasWritten() { // write error response only if no data or headers has been written to client yet
-					writeWebErrorResponse(w, err)
-				}
+			if _, err = io.Copy(writer, gr); err != nil {
 				return err
-			}
-
-			if err = httpWriter.Close(); err != nil {
-				if !httpWriter.HasWritten() { // write error response only if no data has been written to client yet
-					writeWebErrorResponse(w, err)
-					return err
-				}
 			}
 
 			// Notify object accessed via a GET request.
@@ -1694,8 +1748,8 @@ func (web *webAPIHandlers) DownloadZip(w http.ResponseWriter, r *http.Request) {
 				EventName:    event.ObjectAccessedGet,
 				BucketName:   args.BucketName,
 				Object:       info,
-				ReqParams:    extractReqParams(r),
-				RespElements: extractRespElements(w),
+				ReqParams:    reqParams,
+				RespElements: respElements,
 				UserAgent:    r.UserAgent(),
 				Host:         host,
 			})
@@ -1816,7 +1870,7 @@ func (web *webAPIHandlers) GetBucketPolicy(r *http.Request, args *GetBucketPolic
 		}
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	reply.Policy = miniogopolicy.GetPolicy(policyInfo.Statements, args.BucketName, args.Prefix)
 
 	return nil
@@ -1908,7 +1962,7 @@ func (web *webAPIHandlers) ListAllBucketPolicies(r *http.Request, args *ListAllB
 		}
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	for prefix, policy := range miniogopolicy.GetPolicies(policyInfo.Statements, args.BucketName, "") {
 		bucketName, objectPrefix := path2BucketObject(prefix)
 		objectPrefix = strings.TrimSuffix(objectPrefix, "*")
@@ -1933,7 +1987,7 @@ type SetBucketPolicyWebArgs struct {
 func (web *webAPIHandlers) SetBucketPolicy(r *http.Request, args *SetBucketPolicyWebArgs, reply *WebGenericRep) error {
 	ctx := newWebContext(r, args, "WebSetBucketPolicy")
 	objectAPI := web.ObjectAPI()
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 
 	if objectAPI == nil {
 		return toJSONError(ctx, errServerNotInitialized)
@@ -2127,7 +2181,7 @@ func (web *webAPIHandlers) PresignedGet(r *http.Request, args *PresignedGetArgs,
 		return toJSONError(ctx, errPresignedNotAllowed)
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	reply.URL = presignedGet(args.HostName, args.BucketName, args.ObjectName, args.Expiry, creds, region)
 	return nil
 }
@@ -2152,6 +2206,7 @@ func presignedGet(host, bucket, object string, expiry int64, creds auth.Credenti
 	query.Set(xhttp.AmzCredential, credential)
 	query.Set(xhttp.AmzDate, dateStr)
 	query.Set(xhttp.AmzExpires, expiryStr)
+	query.Set(xhttp.ContentDisposition, fmt.Sprintf("attachment; filename=\"%s\"", object))
 	// Set session token if available.
 	if sessionToken != "" {
 		query.Set(xhttp.AmzSecurityToken, sessionToken)
@@ -2185,7 +2240,7 @@ func (web *webAPIHandlers) GetDiscoveryDoc(r *http.Request, args *WebGenericArgs
 		reply.DiscoveryDoc = globalOpenIDConfig.DiscoveryDoc
 		reply.ClientID = globalOpenIDConfig.ClientID
 	}
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	return nil
 }
 
@@ -2194,57 +2249,62 @@ type LoginSTSArgs struct {
 	Token string `json:"token" form:"token"`
 }
 
+var errSTSNotInitialized = errors.New("STS API not initialized, please configure STS support")
+
 // LoginSTS - STS user login handler.
 func (web *webAPIHandlers) LoginSTS(r *http.Request, args *LoginSTSArgs, reply *LoginRep) error {
 	ctx := newWebContext(r, args, "WebLoginSTS")
 
-	v := url.Values{}
-	v.Set("Action", webIdentity)
-	v.Set("WebIdentityToken", args.Token)
-	v.Set("Version", stsAPIVersion)
-
-	scheme := "http"
-	if sourceScheme := handlers.GetSourceScheme(r); sourceScheme != "" {
-		scheme = sourceScheme
-	}
-	if globalIsSSL {
-		scheme = "https"
+	if globalOpenIDValidators == nil {
+		return toJSONError(ctx, errSTSNotInitialized)
 	}
 
-	u := &url.URL{
-		Scheme: scheme,
-		Host:   r.Host,
+	v, err := globalOpenIDValidators.Get("jwt")
+	if err != nil {
+		logger.LogIf(ctx, err)
+		return toJSONError(ctx, errSTSNotInitialized)
 	}
 
-	u.RawQuery = v.Encode()
-
-	req, err := http.NewRequest(http.MethodPost, u.String(), nil)
+	m, err := v.Validate(args.Token, "")
 	if err != nil {
 		return toJSONError(ctx, err)
 	}
 
-	clnt := &http.Client{
-		Transport: NewGatewayHTTPTransport(),
+	// JWT has requested a custom claim with policy value set.
+	// This is a MinIO STS API specific value, this value should
+	// be set and configured on your identity provider as part of
+	// JWT custom claims.
+	var policyName string
+	policySet, ok := iampolicy.GetPoliciesFromClaims(m, iamPolicyClaimNameOpenID())
+	if ok {
+		policyName = globalIAMSys.CurrentPolicies(strings.Join(policySet.ToSlice(), ","))
 	}
-	defer clnt.CloseIdleConnections()
+	if policyName == "" && globalPolicyOPA == nil {
+		return toJSONError(ctx, fmt.Errorf("%s claim missing from the JWT token, credentials will not be generated", iamPolicyClaimNameOpenID()))
+	}
+	m[iamPolicyClaimNameOpenID()] = policyName
 
-	resp, err := clnt.Do(req)
+	secret := globalActiveCred.SecretKey
+	cred, err := auth.GetNewCredentialsWithMetadata(m, secret)
 	if err != nil {
 		return toJSONError(ctx, err)
 	}
-	defer xhttp.DrainBody(resp.Body)
 
-	if resp.StatusCode != http.StatusOK {
-		return toJSONError(ctx, errors.New(resp.Status))
-	}
-
-	a := AssumeRoleWithWebIdentityResponse{}
-	if err = xml.NewDecoder(resp.Body).Decode(&a); err != nil {
+	// Set the newly generated credentials.
+	if err = globalIAMSys.SetTempUser(cred.AccessKey, cred, policyName); err != nil {
 		return toJSONError(ctx, err)
 	}
 
-	reply.Token = a.Result.Credentials.SessionToken
-	reply.UIVersion = browser.UIVersion
+	// Notify all other MinIO peers to reload temp users
+	for _, nerr := range globalNotificationSys.LoadUser(cred.AccessKey, true) {
+		if nerr.Err != nil {
+			logger.GetReqInfo(ctx).SetTags("peerAddress", nerr.Host.String())
+			logger.LogIf(ctx, nerr.Err)
+		}
+	}
+
+	reply.Token = cred.SessionToken
+	reply.UIVersion = Version
 	return nil
 }
 
@@ -2298,6 +2358,8 @@ func toWebAPIError(ctx context.Context, err error) APIError {
 			HTTPStatusCode: http.StatusBadRequest,
 			Description:    err.Error(),
 		}
+	case errSTSNotInitialized:
+		return APIError(stsErrCodes.ToSTSErr(ErrSTSNotInitialized))
 	case errServerNotInitialized:
 		return APIError{
 			Code:           "XMinioServerNotInitialized",

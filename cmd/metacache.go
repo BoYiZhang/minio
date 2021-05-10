@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -46,9 +47,6 @@ const (
 	// Enabling this will make cache sharing more likely and cause less IO,
 	// but may cause additional latency to some calls.
 	metacacheSharePrefix = false
-
-	// metacacheDebug will enable debug printing
-	metacacheDebug = false
 )
 
 //go:generate msgp -file $GOFILE -unexported
@@ -126,7 +124,7 @@ func (m *metacache) matches(o *listPathOptions, extend time.Duration) bool {
 		}
 		if time.Since(m.lastUpdate) > metacacheMaxRunningAge+extend {
 			// Cache ended within bloom cycle, but we can extend the life.
-			o.debugf("cache %s ended (%v) and beyond extended life (%v)", m.id, m.lastUpdate, extend+metacacheMaxRunningAge)
+			o.debugf("cache %s ended (%v) and beyond extended life (%v)", m.id, m.lastUpdate, metacacheMaxRunningAge+extend)
 			return false
 		}
 	}
@@ -148,14 +146,14 @@ func (m *metacache) worthKeeping(currentCycle uint64) bool {
 		// Cycle is somehow bigger.
 		return false
 	case cache.finished() && time.Since(cache.lastHandout) > 48*time.Hour:
-		// Keep only for 2 days. Fallback if crawler is clogged.
+		// Keep only for 2 days. Fallback if scanner is clogged.
 		return false
 	case cache.finished() && currentCycle >= dataUsageUpdateDirCycles && cache.startedCycle < currentCycle-dataUsageUpdateDirCycles:
 		// Cycle is too old to be valuable.
 		return false
 	case cache.status == scanStateError || cache.status == scanStateNone:
-		// Remove failed listings after 10 minutes.
-		return time.Since(cache.lastUpdate) < 10*time.Minute
+		// Remove failed listings after 5 minutes.
+		return time.Since(cache.lastUpdate) < 5*time.Minute
 	}
 	return true
 }
@@ -173,8 +171,9 @@ func (m *metacache) canBeReplacedBy(other *metacache) bool {
 	if m.status == scanStateStarted && time.Since(m.lastUpdate) < metacacheMaxRunningAge {
 		return false
 	}
+
 	// Keep it around a bit longer.
-	if time.Since(m.lastHandout) < time.Hour || time.Since(m.lastUpdate) < metacacheMaxRunningAge {
+	if time.Since(m.lastHandout) < 30*time.Minute || time.Since(m.lastUpdate) < metacacheMaxRunningAge {
 		return false
 	}
 

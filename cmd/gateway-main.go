@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2017-2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -179,7 +180,7 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 
 	// Check and load TLS certificates.
 	var err error
-	globalPublicCerts, globalTLSCerts, globalIsSSL, err = getTLSConfig()
+	globalPublicCerts, globalTLSCerts, globalIsTLS, err = getTLSConfig()
 	logger.FatalIf(err, "Invalid TLS certificate file")
 
 	// Check and load Root CAs.
@@ -211,7 +212,7 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 		if host == "" {
 			host = sortIPs(localIP4.ToSlice())[0]
 		}
-		return fmt.Sprintf("%s://%s", getURLScheme(globalIsSSL), net.JoinHostPort(host, globalMinioPort))
+		return fmt.Sprintf("%s://%s", getURLScheme(globalIsTLS), net.JoinHostPort(host, globalMinioPort))
 	}()
 
 	// Handle gateway specific env
@@ -233,7 +234,7 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 	srvCfg := newServerConfig()
 
 	// Override any values from ENVs.
-	lookupConfigs(srvCfg, 0)
+	lookupConfigs(srvCfg, nil)
 
 	// hold the mutex lock before a new config is assigned.
 	globalServerConfigMu.Lock()
@@ -271,7 +272,7 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 	registerAPIRouter(router)
 
 	// Use all the middlewares
-	router.Use(registerMiddlewares)
+	router.Use(globalHandlers...)
 
 	var getCert certs.GetCertificateFunc
 	if globalTLSCerts != nil {

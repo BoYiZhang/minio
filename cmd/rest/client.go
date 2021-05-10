@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2018-2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package rest
 
@@ -42,6 +43,19 @@ const (
 	closed
 )
 
+// Hold the number of failed RPC calls due to networking errors
+var networkErrsCounter uint64
+
+// GetNetworkErrsCounter returns the number of failed RPC requests
+func GetNetworkErrsCounter() uint64 {
+	return atomic.LoadUint64(&networkErrsCounter)
+}
+
+// ResetNetworkErrsCounter resets the number of failed RPC requests
+func ResetNetworkErrsCounter() {
+	atomic.StoreUint64(&networkErrsCounter, 0)
+}
+
 // NetworkError - error type in case of errors related to http/transport
 // for ex. connection refused, connection reset, dns resolution failure etc.
 // All errors returned by storage-rest-server (ex errFileNotFound, errDiskNotFound) are not considered to be network errors.
@@ -60,6 +74,8 @@ func (n *NetworkError) Unwrap() error {
 
 // Client - http based RPC client.
 type Client struct {
+	connected int32 // ref: https://golang.org/pkg/sync/atomic/#pkg-note-BUG
+
 	// HealthCheckFn is the function set to test for health.
 	// If not set the client will not keep track of health.
 	// Calling this returns true or false if the target
@@ -84,7 +100,6 @@ type Client struct {
 	httpClient   *http.Client
 	url          *url.URL
 	newAuthToken func(audience string) string
-	connected    int32
 }
 
 // URL query separator constants
@@ -113,14 +128,17 @@ func (c *Client) Call(ctx context.Context, method string, values url.Values, bod
 	}
 	req.Header.Set("Authorization", "Bearer "+c.newAuthToken(req.URL.RawQuery))
 	req.Header.Set("X-Minio-Time", time.Now().UTC().Format(time.RFC3339))
+	req.Header.Set("Expect", "100-continue")
 	if length > 0 {
 		req.ContentLength = length
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if c.HealthCheckFn != nil && xnet.IsNetworkOrHostDown(err, c.ExpectTimeouts) {
-			logger.LogIf(ctx, fmt.Errorf("Marking %s temporary offline; caused by %w", c.url.String(), err))
-			c.MarkOffline()
+			atomic.AddUint64(&networkErrsCounter, 1)
+			if c.MarkOffline() {
+				logger.LogIf(ctx, fmt.Errorf("Marking %s temporary offline; caused by %w", c.url.String(), err))
+			}
 		}
 		return nil, &NetworkError{err}
 	}
@@ -150,8 +168,9 @@ func (c *Client) Call(ctx context.Context, method string, values url.Values, bod
 		b, err := ioutil.ReadAll(io.LimitReader(resp.Body, c.MaxErrResponseSize))
 		if err != nil {
 			if c.HealthCheckFn != nil && xnet.IsNetworkOrHostDown(err, c.ExpectTimeouts) {
-				logger.LogIf(ctx, fmt.Errorf("Marking %s temporary offline; caused by %w", c.url.String(), err))
-				c.MarkOffline()
+				if c.MarkOffline() {
+					logger.LogIf(ctx, fmt.Errorf("Marking %s temporary offline; caused by %w", c.url.String(), err))
+				}
 			}
 			return nil, err
 		}
@@ -190,7 +209,8 @@ func (c *Client) IsOnline() bool {
 
 // MarkOffline - will mark a client as being offline and spawns
 // a goroutine that will attempt to reconnect if HealthCheckFn is set.
-func (c *Client) MarkOffline() {
+// returns true if the node changed state from online to offline
+func (c *Client) MarkOffline() bool {
 	// Start goroutine that will attempt to reconnect.
 	// If server is already trying to reconnect this will have no effect.
 	if c.HealthCheckFn != nil && atomic.CompareAndSwapInt32(&c.connected, online, offline) {
@@ -201,12 +221,15 @@ func (c *Client) MarkOffline() {
 					return
 				}
 				if c.HealthCheckFn() {
-					atomic.CompareAndSwapInt32(&c.connected, offline, online)
-					logger.Info("Client %s online", c.url.String())
+					if atomic.CompareAndSwapInt32(&c.connected, offline, online) {
+						logger.Info("Client %s online", c.url.String())
+					}
 					return
 				}
 				time.Sleep(time.Duration(r.Float64() * float64(c.HealthCheckInterval)))
 			}
 		}()
+		return true
 	}
+	return false
 }

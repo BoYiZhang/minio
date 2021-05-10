@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2018 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package policy
 
@@ -27,6 +28,7 @@ const DefaultVersion = "2012-10-17"
 // Args - arguments to policy to check whether it is allowed
 type Args struct {
 	AccountName     string              `json:"account"`
+	Groups          []string            `json:"groups"`
 	Action          Action              `json:"action"`
 	BucketName      string              `json:"bucket"`
 	ConditionValues map[string][]string `json:"conditions"`
@@ -100,27 +102,30 @@ func (policy Policy) MarshalJSON() ([]byte, error) {
 	return json.Marshal(subPolicy(policy))
 }
 
+// Merge merges two policies documents and drop
+// duplicate statements if any.
+func (policy Policy) Merge(input Policy) Policy {
+	var mergedPolicy Policy
+	if policy.Version != "" {
+		mergedPolicy.Version = policy.Version
+	} else {
+		mergedPolicy.Version = input.Version
+	}
+	for _, st := range policy.Statements {
+		mergedPolicy.Statements = append(mergedPolicy.Statements, st.Clone())
+	}
+	for _, st := range input.Statements {
+		mergedPolicy.Statements = append(mergedPolicy.Statements, st.Clone())
+	}
+	mergedPolicy.dropDuplicateStatements()
+	return mergedPolicy
+}
+
 func (policy *Policy) dropDuplicateStatements() {
 redo:
 	for i := range policy.Statements {
 		for j, statement := range policy.Statements[i+1:] {
-			if policy.Statements[i].Effect != statement.Effect {
-				continue
-			}
-
-			if !policy.Statements[i].Principal.Equals(statement.Principal) {
-				continue
-			}
-
-			if !policy.Statements[i].Actions.Equals(statement.Actions) {
-				continue
-			}
-
-			if !policy.Statements[i].Resources.Equals(statement.Resources) {
-				continue
-			}
-
-			if policy.Statements[i].Conditions.String() != statement.Conditions.String() {
+			if !policy.Statements[i].Equals(statement) {
 				continue
 			}
 			policy.Statements = append(policy.Statements[:j], policy.Statements[j+1:]...)

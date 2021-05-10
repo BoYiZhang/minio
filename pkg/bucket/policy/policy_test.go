@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2018 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package policy
 
@@ -1141,6 +1142,100 @@ func TestPolicyValidate(t *testing.T) {
 
 		if expectErr != testCase.expectErr {
 			t.Fatalf("case %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)
+		}
+	}
+}
+
+func TestPolicyMerge(t *testing.T) {
+	testCases := []struct {
+		policy string
+	}{
+		{`{
+    "Version": "2012-10-17",
+    "Id": "S3PolicyId1",
+    "Statement": [
+        {
+            "Sid": "statement1",
+            "Effect": "Deny",
+            "Principal": "*",
+	    "Action":["s3:GetObject", "s3:PutObject"],
+	    "Resource": "arn:aws:s3:::awsexamplebucket1/*"
+        }
+    ]
+}`},
+		{`{
+    "Version": "2012-10-17",
+    "Id": "S3PolicyId1",
+    "Statement": [
+        {
+            "Sid": "statement1",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action":"s3:GetObject",
+            "Resource": "arn:aws:s3:::awsexamplebucket1/*",
+            "Condition" : {
+                "IpAddress" : {
+                    "aws:SourceIp": "192.0.2.0/24"
+                },
+                "NotIpAddress" : {
+                    "aws:SourceIp": "192.0.2.188/32"
+                }
+            }
+        }
+    ]
+}`},
+		{`{
+    "Version": "2012-10-17",
+    "Statement": [
+       {
+            "Sid": "cross-account permission to user in your own account",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::123456789012:user/Dave"
+            },
+            "Action": "s3:PutObject",
+            "Resource": "arn:aws:s3:::awsexamplebucket1/*"
+        },
+        {
+            "Sid": "Deny your user permission to upload object if copy source is not /bucket/folder",
+            "Effect": "Deny",
+            "Principal": {
+                "AWS": "arn:aws:iam::123456789012:user/Dave"
+            },
+            "Action": "s3:PutObject",
+            "Resource": "arn:aws:s3:::awsexamplebucket1/*",
+            "Condition": {
+                "StringNotLike": {
+                    "s3:x-amz-copy-source": "awsexamplebucket1/public/*"
+                }
+            }
+        }
+    ]
+}`},
+	}
+
+	for i, testCase := range testCases {
+		var p Policy
+		err := json.Unmarshal([]byte(testCase.policy), &p)
+		if err != nil {
+			t.Fatalf("case %v: unexpected error: %v", i+1, err)
+		}
+
+		var clonedPolicy Policy
+		clonedPolicy = clonedPolicy.Merge(p)
+
+		j, err := json.Marshal(clonedPolicy)
+		if err != nil {
+			t.Fatalf("case %v: unexpected error: %v", i+1, err)
+		}
+
+		err = json.Unmarshal(j, &clonedPolicy)
+		if err != nil {
+			t.Fatalf("case %v: unexpected error: %v", i+1, err)
+		}
+
+		if !clonedPolicy.Statements[0].Equals(p.Statements[0]) {
+			t.Fatalf("case %v: different policy outcome", i+1)
 		}
 	}
 }

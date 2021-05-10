@@ -1,31 +1,54 @@
-/*
- * MinIO Cloud Storage, (C) 2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"path"
+	pathutil "path"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/minio/minio/cmd/logger"
 )
+
+func renameAllBucketMetacache(epPath string) error {
+	// Rename all previous `.minio.sys/buckets/<bucketname>/.metacache` to
+	// to `.minio.sys/tmp/` for deletion.
+	return readDirFn(pathJoin(epPath, minioMetaBucket, bucketMetaPrefix), func(name string, typ os.FileMode) error {
+		if typ == os.ModeDir {
+			tmpMetacacheOld := pathutil.Join(epPath, minioMetaTmpDeletedBucket, mustGetUUID())
+			if err := renameAll(pathJoin(epPath, minioMetaBucket, metacachePrefixForID(name, slashSeparator)),
+				tmpMetacacheOld); err != nil && err != errFileNotFound {
+				return fmt.Errorf("unable to rename (%s -> %s) %w",
+					pathJoin(epPath, minioMetaBucket+metacachePrefixForID(minioMetaBucket, slashSeparator)),
+					tmpMetacacheOld,
+					osErrToFileErr(err))
+			}
+		}
+		return nil
+	})
+}
 
 // listPath will return the requested entries.
 // If no more entries are in the listing io.EOF is returned,
@@ -53,17 +76,11 @@ func (z *erasureServerPools) listPath(ctx context.Context, o listPathOptions) (e
 	}
 
 	// For delimiter and prefix as '/' we do not list anything at all
-	// since according to s3 spec we stop at the 'delimiter'
 	// along // with the prefix. On a flat namespace with 'prefix'
 	// as '/' we don't have any entries, since all the keys are
 	// of form 'keyName/...'
-	if o.Separator == SlashSeparator && o.Prefix == SlashSeparator {
+	if strings.HasPrefix(o.Prefix, SlashSeparator) {
 		return entries, io.EOF
-	}
-
-	// Over flowing count - reset to maxObjectList.
-	if o.Limit < 0 || o.Limit > maxObjectList {
-		o.Limit = maxObjectList
 	}
 
 	// If delimiter is slashSeparator we must return directories of
@@ -147,13 +164,11 @@ func (z *erasureServerPools) listPath(ctx context.Context, o listPathOptions) (e
 	var wg sync.WaitGroup
 	var errs []error
 	allAtEOF := true
-	asked := 0
 	mu.Lock()
 	// Ask all sets and merge entries.
-	for _, zone := range z.serverPools {
-		for _, set := range zone.sets {
+	for _, pool := range z.serverPools {
+		for _, set := range pool.sets {
 			wg.Add(1)
-			asked++
 			go func(i int, set *erasureObjects) {
 				defer wg.Done()
 				e, err := set.listPath(ctx, o)

@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2020 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -51,7 +52,7 @@ func TestDataUsageUpdate(t *testing.T) {
 	}
 	createUsageTestFiles(t, base, bucket, files)
 
-	getSize := func(item crawlItem) (sizeS sizeSummary, err error) {
+	getSize := func(item scannerItem) (sizeS sizeSummary, err error) {
 		if item.Typ&os.ModeDir == 0 {
 			var s os.FileInfo
 			s, err = os.Stat(item.Path)
@@ -64,7 +65,7 @@ func TestDataUsageUpdate(t *testing.T) {
 		return
 	}
 
-	got, err := crawlDataFolder(context.Background(), base, dataUsageCache{Info: dataUsageCacheInfo{Name: bucket}}, getSize)
+	got, err := scanDataFolder(context.Background(), base, dataUsageCache{Info: dataUsageCacheInfo{Name: bucket}}, getSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +186,7 @@ func TestDataUsageUpdate(t *testing.T) {
 		},
 	}
 	createUsageTestFiles(t, base, bucket, files)
-	got, err = crawlDataFolder(context.Background(), base, got, getSize)
+	got, err = scanDataFolder(context.Background(), base, got, getSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +271,7 @@ func TestDataUsageUpdate(t *testing.T) {
 	}
 	// Changed dir must be picked up in this many cycles.
 	for i := 0; i < dataUsageUpdateDirCycles; i++ {
-		got, err = crawlDataFolder(context.Background(), base, got, getSize)
+		got, err = scanDataFolder(context.Background(), base, got, getSize)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -347,7 +348,7 @@ func TestDataUsageUpdatePrefix(t *testing.T) {
 	}
 	createUsageTestFiles(t, base, "", files)
 
-	getSize := func(item crawlItem) (sizeS sizeSummary, err error) {
+	getSize := func(item scannerItem) (sizeS sizeSummary, err error) {
 		if item.Typ&os.ModeDir == 0 {
 			var s os.FileInfo
 			s, err = os.Stat(item.Path)
@@ -359,7 +360,7 @@ func TestDataUsageUpdatePrefix(t *testing.T) {
 		}
 		return
 	}
-	got, err := crawlDataFolder(context.Background(), base, dataUsageCache{Info: dataUsageCacheInfo{Name: "bucket"}}, getSize)
+	got, err := scanDataFolder(context.Background(), base, dataUsageCache{Info: dataUsageCacheInfo{Name: "bucket"}}, getSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +470,7 @@ func TestDataUsageUpdatePrefix(t *testing.T) {
 		},
 	}
 	createUsageTestFiles(t, base, "", files)
-	got, err = crawlDataFolder(context.Background(), base, got, getSize)
+	got, err = scanDataFolder(context.Background(), base, got, getSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +553,7 @@ func TestDataUsageUpdatePrefix(t *testing.T) {
 	}
 	// Changed dir must be picked up in this many cycles.
 	for i := 0; i < dataUsageUpdateDirCycles; i++ {
-		got, err = crawlDataFolder(context.Background(), base, got, getSize)
+		got, err = scanDataFolder(context.Background(), base, got, getSize)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -646,7 +647,7 @@ func TestDataUsageCacheSerialize(t *testing.T) {
 	}
 	createUsageTestFiles(t, base, bucket, files)
 
-	getSize := func(item crawlItem) (sizeS sizeSummary, err error) {
+	getSize := func(item scannerItem) (sizeS sizeSummary, err error) {
 		if item.Typ&os.ModeDir == 0 {
 			var s os.FileInfo
 			s, err = os.Stat(item.Path)
@@ -658,7 +659,7 @@ func TestDataUsageCacheSerialize(t *testing.T) {
 		}
 		return
 	}
-	want, err := crawlDataFolder(context.Background(), base, dataUsageCache{Info: dataUsageCacheInfo{Name: bucket}}, getSize)
+	want, err := scanDataFolder(context.Background(), base, dataUsageCache{Info: dataUsageCacheInfo{Name: bucket}}, getSize)
 	if err != nil {
 		t.Fatal(err)
 	}

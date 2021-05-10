@@ -1,11 +1,11 @@
 /*
- * MinIO Cloud Storage (C) 2018 MinIO, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -94,7 +94,7 @@ export const uploadFile = file => {
       _filePath = _filePath.substring(1)
     }
     const filePath = _filePath
-    const objectName = `${currentPrefix}${filePath}`
+    const objectName = encodeURIComponent(`${currentPrefix}${filePath}`)
     const uploadUrl = `${
       window.location.origin
     }${minioBrowserPrefix}/upload/${currentBucket}/${objectName}`

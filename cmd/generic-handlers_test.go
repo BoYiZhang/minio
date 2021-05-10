@@ -1,18 +1,19 @@
-/*
- * MinIO Cloud Storage, (C) 2016 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/minio/minio/cmd/crypto"
+	xhttp "github.com/minio/minio/cmd/http"
 )
 
 // Tests getRedirectLocation function for all its criteria.
@@ -181,15 +183,15 @@ var containsReservedMetadataTests = []struct {
 		header: http.Header{"X-Minio-Key": []string{"value"}},
 	},
 	{
-		header:     http.Header{crypto.SSEIV: []string{"iv"}},
+		header:     http.Header{crypto.MetaIV: []string{"iv"}},
 		shouldFail: true,
 	},
 	{
-		header:     http.Header{crypto.SSESealAlgorithm: []string{crypto.InsecureSealAlgorithm}},
+		header:     http.Header{crypto.MetaAlgorithm: []string{crypto.InsecureSealAlgorithm}},
 		shouldFail: true,
 	},
 	{
-		header:     http.Header{crypto.SSECSealedKey: []string{"mac"}},
+		header:     http.Header{crypto.MetaSealedKeySSEC: []string{"mac"}},
 		shouldFail: true,
 	},
 	{
@@ -217,21 +219,21 @@ var sseTLSHandlerTests = []struct {
 	Header            http.Header
 	IsTLS, ShouldFail bool
 }{
-	{URL: &url.URL{}, Header: http.Header{}, IsTLS: false, ShouldFail: false},                                        // 0
-	{URL: &url.URL{}, Header: http.Header{crypto.SSECAlgorithm: []string{"AES256"}}, IsTLS: false, ShouldFail: true}, // 1
-	{URL: &url.URL{}, Header: http.Header{crypto.SSECAlgorithm: []string{"AES256"}}, IsTLS: true, ShouldFail: false}, // 2
-	{URL: &url.URL{}, Header: http.Header{crypto.SSECKey: []string{""}}, IsTLS: true, ShouldFail: false},             // 3
-	{URL: &url.URL{}, Header: http.Header{crypto.SSECopyAlgorithm: []string{""}}, IsTLS: false, ShouldFail: true},    // 4
+	{URL: &url.URL{}, Header: http.Header{}, IsTLS: false, ShouldFail: false},                                                                  // 0
+	{URL: &url.URL{}, Header: http.Header{xhttp.AmzServerSideEncryptionCustomerAlgorithm: []string{"AES256"}}, IsTLS: false, ShouldFail: true}, // 1
+	{URL: &url.URL{}, Header: http.Header{xhttp.AmzServerSideEncryptionCustomerAlgorithm: []string{"AES256"}}, IsTLS: true, ShouldFail: false}, // 2
+	{URL: &url.URL{}, Header: http.Header{xhttp.AmzServerSideEncryptionCustomerKey: []string{""}}, IsTLS: true, ShouldFail: false},             // 3
+	{URL: &url.URL{}, Header: http.Header{xhttp.AmzServerSideEncryptionCopyCustomerAlgorithm: []string{""}}, IsTLS: false, ShouldFail: true},   // 4
 }
 
 func TestSSETLSHandler(t *testing.T) {
-	defer func(isSSL bool) { globalIsSSL = isSSL }(globalIsSSL) // reset globalIsSSL after test
+	defer func(isSSL bool) { globalIsTLS = isSSL }(globalIsTLS) // reset globalIsTLS after test
 
 	var okHandler http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}
 	for i, test := range sseTLSHandlerTests {
-		globalIsSSL = test.IsTLS
+		globalIsTLS = test.IsTLS
 
 		w := httptest.NewRecorder()
 		r := new(http.Request)

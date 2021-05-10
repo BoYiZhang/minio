@@ -1,24 +1,28 @@
-/*
- * MinIO Cloud Storage, (C) 2017-2019 MinIO, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
+	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/gob"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -27,31 +31,64 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/fatih/color"
 	dns2 "github.com/miekg/dns"
 	"github.com/minio/cli"
 	"github.com/minio/minio-go/v7/pkg/set"
 	"github.com/minio/minio/cmd/config"
+	"github.com/minio/minio/cmd/crypto"
 	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/certs"
+	"github.com/minio/minio/pkg/console"
 	"github.com/minio/minio/pkg/env"
+	"github.com/minio/minio/pkg/handlers"
+	"github.com/minio/minio/pkg/kms"
 )
 
+// serverDebugLog will enable debug printing
+var serverDebugLog = env.Get("_MINIO_SERVER_DEBUG", config.EnableOff) == config.EnableOn
+
 func init() {
+	rand.Seed(time.Now().UTC().UnixNano())
+
 	logger.Init(GOPATH, GOROOT)
 	logger.RegisterError(config.FmtError)
 
-	rand.Seed(time.Now().UTC().UnixNano())
-	globalDNSCache = xhttp.NewDNSCache(3*time.Second, 10*time.Second)
+	// Inject into config package.
+	config.Logger.Info = logger.Info
+	config.Logger.LogIf = logger.LogIf
+
+	if IsKubernetes() || IsDocker() || IsBOSH() || IsDCOS() || IsKubernetesReplicaSet() || IsPCFTile() {
+		// 30 seconds matches the orchestrator DNS TTLs, have
+		// a 5 second timeout to lookup from DNS servers.
+		globalDNSCache = xhttp.NewDNSCache(30*time.Second, 5*time.Second, logger.LogOnceIf)
+	} else {
+		// On bare-metals DNS do not change often, so it is
+		// safe to assume a higher timeout upto 10 minutes.
+		globalDNSCache = xhttp.NewDNSCache(10*time.Minute, 5*time.Second, logger.LogOnceIf)
+	}
 
 	initGlobalContext()
 
-	globalReplicationState = newReplicationState()
+	globalForwarder = handlers.NewForwarder(&handlers.Forwarder{
+		PassHost:     true,
+		RoundTripper: newGatewayHTTPTransport(1 * time.Hour),
+		Logger: func(err error) {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.LogIf(GlobalContext, err)
+			}
+		},
+	})
+
 	globalTransitionState = newTransitionState()
+
+	console.SetColor("Debug", color.New())
 
 	gob.Register(StorageErr(""))
 }
@@ -234,6 +271,14 @@ func handleCommonEnvVars() {
 			}
 			globalDomainNames = append(globalDomainNames, domainName)
 		}
+		sort.Strings(globalDomainNames)
+		lcpSuf := lcpSuffix(globalDomainNames)
+		for _, domainName := range globalDomainNames {
+			if domainName == lcpSuf && len(globalDomainNames) > 1 {
+				logger.Fatal(config.ErrOverlappingDomainValue(nil).Msg("Overlapping domains `%s` not allowed", globalDomainNames),
+					"Invalid MINIO_DOMAIN value in environment variable")
+			}
+		}
 	}
 
 	publicIPs := env.Get(config.EnvPublicIPs, "")
@@ -276,18 +321,66 @@ func handleCommonEnvVars() {
 				"Unable to validate credentials inherited from the shell environment")
 		}
 		globalActiveCred = cred
-		globalConfigEncrypted = true
 	}
 
-	if env.IsSet(config.EnvAccessKeyOld) && env.IsSet(config.EnvSecretKeyOld) {
-		oldCred, err := auth.CreateCredentials(env.Get(config.EnvAccessKeyOld, ""), env.Get(config.EnvSecretKeyOld, ""))
+	if env.IsSet(config.EnvRootUser) || env.IsSet(config.EnvRootPassword) {
+		cred, err := auth.CreateCredentials(env.Get(config.EnvRootUser, ""), env.Get(config.EnvRootPassword, ""))
 		if err != nil {
 			logger.Fatal(config.ErrInvalidCredentials(err),
-				"Unable to validate the old credentials inherited from the shell environment")
+				"Unable to validate credentials inherited from the shell environment")
 		}
-		globalOldCred = oldCred
-		os.Unsetenv(config.EnvAccessKeyOld)
-		os.Unsetenv(config.EnvSecretKeyOld)
+		globalActiveCred = cred
+	}
+
+	switch {
+	case env.IsSet(config.EnvKMSSecretKey) && env.IsSet(config.EnvKESEndpoint):
+		logger.Fatal(errors.New("ambigious KMS configuration"), fmt.Sprintf("The environment contains %q as well as %q", config.EnvKMSSecretKey, config.EnvKESEndpoint))
+	case env.IsSet(config.EnvKMSMasterKey) && env.IsSet(config.EnvKESEndpoint):
+		logger.Fatal(errors.New("ambigious KMS configuration"), fmt.Sprintf("The environment contains %q as well as %q", config.EnvKMSMasterKey, config.EnvKESEndpoint))
+	}
+
+	if env.IsSet(config.EnvKMSSecretKey) {
+		GlobalKMS, err = kms.Parse(env.Get(config.EnvKMSSecretKey, ""))
+		if err != nil {
+			logger.Fatal(err, "Unable to parse the KMS secret key inherited from the shell environment")
+		}
+	} else if env.IsSet(config.EnvKMSMasterKey) {
+		// FIXME: remove this block by June 2021
+		logger.LogIf(GlobalContext, fmt.Errorf("legacy KMS configuration, this environment variable %q is deprecated and will be removed by June 2021", config.EnvKMSMasterKey))
+		v := strings.SplitN(env.Get(config.EnvKMSMasterKey, ""), ":", 2)
+		if len(v) != 2 {
+			logger.Fatal(errors.New("invalid "+config.EnvKMSMasterKey), "Unable to parse the KMS secret key inherited from the shell environment")
+		}
+		secretKey, err := hex.DecodeString(v[1])
+		if err != nil {
+			logger.Fatal(err, "Unable to parse the KMS secret key inherited from the shell environment")
+		}
+		GlobalKMS, err = kms.New(v[0], secretKey)
+		if err != nil {
+			logger.Fatal(err, "Unable to parse the KMS secret key inherited from the shell environment")
+		}
+	}
+	if env.IsSet(config.EnvKESEndpoint) {
+		kesEndpoints, err := crypto.ParseKESEndpoints(env.Get(config.EnvKESEndpoint, ""))
+		if err != nil {
+			logger.Fatal(err, "Unable to parse the KES endpoints inherited from the shell environment")
+		}
+		KMS, err := crypto.NewKes(crypto.KesConfig{
+			Enabled:      true,
+			Endpoint:     kesEndpoints,
+			DefaultKeyID: env.Get(config.EnvKESKeyName, ""),
+			CertFile:     env.Get(config.EnvKESClientCert, ""),
+			KeyFile:      env.Get(config.EnvKESClientKey, ""),
+			CAPath:       env.Get(config.EnvKESServerCA, globalCertsCADir.Get()),
+			Transport:    newCustomHTTPTransportWithHTTP2(&tls.Config{RootCAs: globalRootCAs}, defaultDialTimeout)(),
+		})
+		if err != nil {
+			logger.Fatal(err, "Unable to initialize a connection to KES as specified by the shell environment")
+		}
+		GlobalKMS = KMS
+	}
+	if tiers := env.Get("_MINIO_DEBUG_REMOTE_TIERS_IMMEDIATELY", ""); tiers != "" {
+		globalDebugRemoteTiersImmediately = strings.Split(tiers, ",")
 	}
 }
 
@@ -374,4 +467,14 @@ func getTLSConfig() (x509Certs []*x509.Certificate, manager *certs.Manager, secu
 	}
 	secureConn = true
 	return x509Certs, manager, secureConn, nil
+}
+
+// contextCanceled returns whether a context is canceled.
+func contextCanceled(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+		return false
+	}
 }
